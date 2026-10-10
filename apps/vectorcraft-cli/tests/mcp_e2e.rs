@@ -68,7 +68,7 @@ impl Mcp {
         serde_json::from_str(&text).unwrap_or(Value::String(text))
     }
     fn run(&mut self, command: &str, params: Value) -> Value {
-        self.tool_json("run_command", json!({"command": command, "params": params}))
+        self.tool_json("command_run", json!({"id": command, "params": params}))
     }
     fn document(&mut self) -> Value {
         let v = self.request("resources/read", json!({"uri": "vectorcraft://document/json"}));
@@ -121,8 +121,7 @@ fn initialize_and_list_tools_with_valid_schemas() {
             assert!(props.contains_key(r.as_str().unwrap()), "{name}: required {r} missing");
         }
     }
-    for want in ["run_command", "draw_shape", "draw_path", "pointer_gesture", "screenshot", "export", "open_file", "undo", "redo", "inspect_document"]
-    {
+    for want in ["command_run", "draw_shape", "draw_path", "pointer_gesture", "screenshot", "export", "open_file", "undo", "redo", "doc_inspect"] {
         assert!(tools.iter().any(|t| t["name"] == want), "missing tool {want}");
     }
     // ping and an unknown method.
@@ -145,7 +144,7 @@ fn draw_inspect_batch_undo_redo() {
         {"kind": "down", "x": 300, "y": 300}, {"kind": "drag", "x": 350, "y": 340}, {"kind": "drag", "x": 400, "y": 380}, {"kind": "up", "x": 400, "y": 380}
     ]}));
     assert_eq!(m.art_count(), base + 4);
-    let inspect = m.tool_json("inspect_document", json!({}));
+    let inspect = m.tool_json("doc_inspect", json!({}));
     let text = inspect.to_string();
     assert!(text.contains("Rectangle") || text.contains("rectangle"), "{text}");
 
@@ -168,11 +167,11 @@ fn draw_inspect_batch_undo_redo() {
     assert!(vectorcraft_testkit::invariants::json_approx_eq(&m.document(), &after, 1e-12));
 
     // Tool errors are reported in-band, and the server keeps working.
-    let v = m.request("tools/call", json!({"name": "run_command", "arguments": {"command": "no.such.command"}}));
+    let v = m.request("tools/call", json!({"name": "command_run", "arguments": {"id": "no.such.command"}}));
     assert_eq!(v["result"]["isError"], json!(true), "{v}");
     let v = m.request("tools/call", json!({"name": "draw_shape", "arguments": {"shape": "hexagram"}}));
     assert_eq!(v["result"]["isError"], json!(true));
-    m.tool("inspect_document", json!({}));
+    m.tool("doc_inspect", json!({}));
     m.close();
 }
 
@@ -229,7 +228,7 @@ fn export_formats_and_reopen() {
     assert!(m.art_count() >= n, "svg re-open lost art");
     m.run("document.open", json!({"path": pdf}));
     assert!(m.art_count() >= n, "pdf re-open lost art");
-    let docs = m.tool_json("inspect_document", json!({}));
+    let docs = m.tool_json("doc_inspect", json!({}));
     assert!(docs.is_object());
 
     // save_file writes the native format to a new path and it loads.

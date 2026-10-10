@@ -9,7 +9,7 @@ It has two backends:
 | Mode | How | What works |
 |---|---|---|
 | **Remote** | `vectorcraft-cli mcp --connect 127.0.0.1:7979` (the app must run with `vectorcraft --control 7979`) | Everything. Tool calls are forwarded over the [control protocol](control-protocol.md), so you watch the app change live. |
-| **Headless** | `vectorcraft-cli mcp --headless` | An in-process engine session with a CPU renderer. Everything except the UI-only tools (`inspect_ui`, `type_text`, `open_panel`, `screenshot {window:true}`). |
+| **Headless** | `vectorcraft-cli mcp --headless` | An in-process engine session with a CPU renderer. Everything except the UI-only tools (`ui_inspect`, `type_text`, `open_panel`, `screenshot {window:true}`). |
 
 With no flag, the server tries `127.0.0.1:7979` and falls back to headless. Logs go to stderr; stdout carries
 only protocol messages.
@@ -34,12 +34,10 @@ For a live session, start the app first: `cargo run --release -p vectorcraft -- 
 
 ## Protocol
 
-Newline-delimited JSON-RPC 2.0 on stdio. The revision is **`2025-06-18`**; `2025-03-26` and `2024-11-05` are
-accepted too. Clients requesting `2026-07-28` through `initialize`, or through a request's
-`_meta["io.modelcontextprotocol/protocolVersion"]`, receive `resultType: "complete"`,
-`ttlMs` and `cacheScope: "private"` on tool/resource/template/prompt lists and resource/prompt reads.
-List TTL is 600000 ms; live reads use zero. Older clients keep the original response shapes.
-This does not add streaming or input requests — see [Not implemented](#not-implemented).
+Newline-delimited JSON-RPC 2.0 on stdio, implementing only **`2025-06-18`**. `initialize`
+returns this revision for negotiation. Each line carries one message; arrays are rejected as
+invalid requests without executing their contents. Request metadata does not change the
+protocol or response shape.
 
 `initialize` advertises:
 
@@ -77,14 +75,14 @@ is thousands of lines an agent pays for again on every change.
 
 | `uriTemplate` | Reads |
 |---|---|
-| `vectorcraft://object/{id}` | One layer or object with its children, bounds and paint: `document.node {id, summary: true}`, the node as `document.inspect` lists it. A large container can be sliced with `run_command document.node {id, summary: true, depth?, childLimit?}` (a level that shows fewer children reports `childCount`) |
+| `vectorcraft://object/{id}` | One layer or object with its children, bounds and paint: `document.node {id, summary: true}`, the node as `document.inspect` lists it. A large container can be sliced with `command_run document.node {id, summary: true, depth?, childLimit?}` (a level that shows fewer children reports `childCount`) |
 | `vectorcraft://command/{id}` | One command: label, menu path, shortcut, parameter description, enablement |
 | `vectorcraft://effect/{id}` | One live effect with its parameters and defaults |
 | `vectorcraft://swatch/{name}` | One swatch, colour, gradient or pattern swatch (percent-encode spaces) |
 
 An unknown URI is `-32002`; a template with no value, or a value that names nothing, is `-32602`.
 
-The same reads work as query commands through `run_command`: `document.node {id}` returns the object's full model
+The same reads work as query commands through `command_run`: `document.node {id}` returns the object's full model
 JSON (geometry, appearance, every attribute) and `document.node {id, summary: true}` the compact summary
 `document.inspect` gives for it (id, name, kind, bounds, paint labels, children), without summarizing the whole
 document. A summary read slices a large container: `depth` is how many child levels it includes (`0`: the node
@@ -93,8 +91,8 @@ that shows fewer children than it has reports their total as `childCount`, so tr
 nothing truncated the reply is the plain summary. Both must be non-negative integers and need `summary: true`
 (the full object JSON is never truncated); anything else is an error.
 
-On a large document, drill instead of dumping: `inspect_document {depth: 0}` (or `run_command document.inspect
-{depth?, childLimit?}`, same rules) is the skeleton (artboards with top layers and counts), `run_command
+On a large document, drill instead of dumping: `doc_inspect {depth: 0}` (or `command_run document.inspect
+{depth?, childLimit?}`, same rules) is the skeleton (artboards with top layers and counts), `command_run
 document.find {name?, kind?, text?, limit?}` locates nodes across the whole tree, and `document.node` reads the
 interesting ones sliced. `document.find` needs at least one filter and all given filters must match; matching
 ignores case, `name` is a substring of the Layers panel name, `text` a substring of type content and `kind` the
@@ -149,7 +147,7 @@ about a change expects.
 - **`notifications/cancelled`.** It would have to be read *during* the call it cancels.
 - **`sampling/createMessage` and `elicitation/create`.** Both are server→client requests, blocked by
   the same one-line-one-reply loop. Supporting them means being able to suspend a tool call
-  mid-flight, which is what the `2026-07-28` revision's input-requests mechanism exists for.
+  mid-flight.
 - **Streamable HTTP / SSE.** stdio only.
 
 `completion/complete` covers the "what could I pass here" half of the same problem, which is why it
@@ -161,14 +159,13 @@ the transport — a design change rather than a feature, so it is not in this cr
 ### Common command tools
 
 These names match the conventions in [FilmCraft #28](https://github.com/storytold/filmcraft/pull/28).
-The older names below remain listed because existing workflows use them.
 
 | Tool | Arguments and result |
 |---|---|
 | `command_list` | Optional `filter`, `enabled_only`; returns the command array |
 | `command_run` | `id`, optional `params`; runs the command through the existing backend |
 | `command_batch` | `steps: [{id, params?}]`, optional `stop_on_error` (default true); returns `completed`, `failed`, `results: [{ok, result\|error}]`. Each edit has its own undo step; failures set `isError` |
-| `doc_inspect` | Optional `depth`, `childLimit`; same summary as `inspect_document` |
+| `doc_inspect` | Optional `depth`, `childLimit`; artboards, layer tree, selection, history, tool and paint |
 | `render_preview` | Optional `max_side` (1–4096, default 1024); inline PNG of the first artboard without editing it. Artboards too large to render within the allocation bound return a tool error |
 | `ui_inspect`, `ui_screenshot` | Connected desktop state/window capture; tool errors in headless mode |
 
@@ -178,14 +175,13 @@ argument keys return JSON-RPC `-32602`; command failures and caught tool panics 
 content, and the server continues serving. Command `params` are passed through: the registry
 currently describes them in prose, so MCP does not guess schemas or silently remove keys.
 
-
 Coordinates are points in document space: y points down, the origin is the first artboard's top-left, and a new
 document is 612 × 792 (US Letter). New objects become the selection. Most commands act on the selection or on
 explicit `ids`.
 
 Paint values (`fill`, `stroke`) accept `"#rrggbb"`, `"none"`, `[r,g,b]` (0..1), `{"c","m","y","k"}`, `{"gray"}`,
 or a full `paint.setFill` params object (`{"gradient": …}`, `{"swatch": "name"}`).
-The Fill/Stroke proxy commands run through `run_command`: `paint.invert` and `paint.complement` recolour the active
+The Fill/Stroke proxy commands run through `command_run`: `paint.invert` and `paint.complement` recolour the active
 proxy keeping each colour's model, `paint.lastColor` / `paint.lastGradient` re-apply the last solid colour or gradient,
 and `paint.recent` returns the recent colours that every paint command (and the eyedropper) feeds.
 `paint.proxies` returns what the proxies show: the fill and stroke, which one is active, and whether the selected
@@ -193,10 +189,10 @@ objects' fills or strokes differ (`fillMixed` / `strokeMixed`, drawn as a "?" pr
 
 | Tool | Arguments | Notes |
 |---|---|---|
-| `list_commands` | `{filter?, enabledOnly?}` | The command catalogue: id, label, menu, shortcut, params doc, enablement. |
-| `run_command` | `{command, params?}` | Runs any command. Use it for everything without a dedicated tool. |
-| `inspect_document` | `{depth?, childLimit?}` | Artboards, layer tree (ids, kinds, bounds, paint), selection, history, tool. A type node's `fill`, `stroke` and `strokeWidth` are the paint its characters show (its first run's); fills and strokes of the type object itself come as `objectFill`, `objectStroke` and `objectStrokeWidth`. Paint comes as a label (`"#ff0000"`, `"None"`, `"G1 40% (#ff9999)"` for a swatch at a tint); `paint.proxies` gives it as an object. |
-| `inspect_ui` | `{}` | UI state. Remote mode only. |
+| `command_list` | `{filter?, enabled_only?}` | The command catalogue: id, label, menu, shortcut, params doc, enablement. |
+| `command_run` | `{id, params?}` | Runs any command. Use it for everything without a dedicated tool. |
+| `doc_inspect` | `{depth?, childLimit?}` | Artboards, layer tree (ids, kinds, bounds, paint), selection, history, tool. A type node's `fill`, `stroke` and `strokeWidth` are the paint its characters show (its first run's); fills and strokes of the type object itself come as `objectFill`, `objectStroke` and `objectStrokeWidth`. Paint comes as a label (`"#ff0000"`, `"None"`, `"G1 40% (#ff9999)"` for a swatch at a tint); `paint.proxies` gives it as an object. |
+| `ui_inspect` | `{}` | UI state. Remote mode only. |
 | `select_tool` | `{tool}` | `selection`, `directSelection`, `pen`, `rectangle`, `ellipse`, `polygon`, `star`, `lineSegment`, … |
 | `pointer_gesture` | `{events:[{kind,x,y,mods?}], tool?, mods?}` | `kind` is one of `down`, `drag`, `up`, `move`, `doubleclick`. Events go through the same path as the mouse. |
 | `draw_path` | `{points \| d, closed?, fill?, stroke?, strokeWidth?}` | `points` is `[[x,y],…]` or `[{x,y,in?,out?,smooth?},…]`. `d` is SVG path data. |
@@ -207,14 +203,14 @@ objects' fills or strokes differ (`fillMixed` / `strokeMixed`, drawn as a "?" pr
 | `invoke_menu` | `{command, params?}` | Invokes a menu item by command id. Includes UI commands such as `view.*` and `window.*` in remote mode. |
 | `open_panel` | `{panel}` | Remote only. `panel` is a panel id (`layers`, `swatches`, `colorGuide`, …, as `window.panel` takes) or its display label (`"Color Guide"`), in any case. |
 | `screenshot` | `{path?, scale?, artboard?, window?}` | Returns MCP image content (`image/png`, base64) plus a text block. Renders the artboard; `window:true` captures the app window (remote only). |
-| `open_file` | `{path}` | Opens any readable file as a new active document: `.vectorcraft`/`.drawcraft`, `.vctemplate`, `.svg`/`.svgz`, `.pdf`/`.ai`, `.ait`, `.eps`, `.dxf`, `.emf`, `.wmf`, PNG, JPEG, GIF, WebP, TIFF, BMP (an image opens as a document of its pixel size). Templates (`.vctemplate`, `.ait`) open as a new untitled document. PDF, `.ai` and SVG files saved with Preserve Editing reopen as the document they carry. The reply is `document.open`'s: its `warnings` say what didn't come in as it was (an EPS whose PostScript can't be read opens as its preview, and the warning names the PostScript error, the operator and the procedure). `run_command document.formats` lists the formats. |
+| `open_file` | `{path}` | Opens any readable file as a new active document: `.vectorcraft`/`.drawcraft`, `.vctemplate`, `.svg`/`.svgz`, `.pdf`/`.ai`, `.ait`, `.eps`, `.dxf`, `.emf`, `.wmf`, PNG, JPEG, GIF, WebP, TIFF, BMP (an image opens as a document of its pixel size). Templates (`.vctemplate`, `.ait`) open as a new untitled document. PDF, `.ai` and SVG files saved with Preserve Editing reopen as the document they carry. The reply is `document.open`'s: its `warnings` say what didn't come in as it was (an EPS whose PostScript can't be read opens as its preview, and the warning names the PostScript error, the operator and the procedure). `command_run document.formats` lists the formats. |
 | `save_file` | `{path?}` | Runs `document.save`: the document's own file in its own format (native `.vectorcraft` unless it was opened from or saved as SVG, PDF or a restorable `.ai`; then `warnings` say what that format loses). A path's extension picks the format (`.vectorcraft`, `.vctemplate`, `.pdf`, `.svg`, `.svgz`, `.ai`: a PDF carrying the native document, which reopens editable). |
 | `export` | `{path?, format?, scale?, artboard?, range?, selection?, outlineText?, options?}` | `svg`, `svgz`, `pdf`, `eps`, `dxf`, `emf`, `wmf`, `png`, `jpg`, `webp`, `gif`, `png8` (an indexed `.png`), `tiff`, `bmp`, `tga`, `psd` (layered), `txt` (the document's text), `vectorcraft` or `template` (a native template). The tool's `format` enum and `document.formats` list them, generated from the engine's format table. When `format` is omitted, it comes from the path's extension. PDF writes one page per artboard: all of them, or `artboard` (0-based) / `range` (`"1-3, 5"`, 1-based); the other formats write one artboard. `options` carries more format options (e.g. `{"quality": 80}` for JPEG). `selection: true` exports the selected objects cropped to their bounds (the reply adds their `bounds`, and reports `format` and the encoder's `warnings` as a whole-document export does); `outlineText: true` writes SVG text as paths. Template layers are left out, live effects are kept, and exporting `vectorcraft` never changes the document's path. Without `path` the bytes come back as `dataBase64`. Both backends run the same `document.export` call. |
 | `add_text` | `{text, x?, y?, width?, height?, path?, mode?, pathEffect?, size?, font?, color?}` | Point type at (x, y); area type with `width`/`height`; or `path` + `mode` (`area`/`onPath`) to flow text in or along a path, with `pathEffect` (`rainbow`, `skew`, `3dRibbon`, `stairStep`, `gravity`). |
 | `apply_effect` | `{effect?, params?, ids?}` | Appends a live effect. Without `effect`, returns the effect catalogue with parameters and defaults. |
 | `pathfinder` | `{operation, ids?}` | `unite`, `minusFront`, `intersect`, `exclude`, `divide`, `trim`, `merge`, `crop`, `outline`, `minusBack`. For a live version, apply the `pathfinder.*` effect to a group (`effect.apply` groups several loose selected objects first). |
 | `transform` | `{ids?, dx?, dy?, rotate?, scale?, scaleX?, scaleY?, reflect?, shear?, origin?, copy?}` | Runs move, rotate, scale, reflect, shear in that order. With `copy`, the first step duplicates. |
-| `create_graph` | `{type?, x, y, width, height, csv? \| series?, categories?, rows?}` | The nine Illustrator graph types: column, stacked column, bar, stacked bar, line, area, scatter, pie and radar. Edit later with `graph.setData` / `graph.setType` via `run_command`. |
+| `create_graph` | `{type?, x, y, width, height, csv? \| series?, categories?, rows?}` | The nine Illustrator graph types: column, stacked column, bar, stacked bar, line, area, scatter, pie and radar. Edit later with `graph.setData` / `graph.setType` via `command_run`. |
 | `text_wrap` | `{ids?, offset?, invert?, release?}` | Area type below the objects (same layer) flows around them. |
 | `undo` / `redo` | `{}` | |
 
@@ -231,18 +227,18 @@ mode: "set"|"add"|"toggle"|"subtract"}`:
 Appearance stacks: an object can carry several fills and strokes (`appearance.addFill`, `appearance.addStroke`), indexed
 in paint order (0 is painted first, the bottom row of the Appearance panel). `paint.setFill`, `paint.setStroke`,
 `stroke.set`, `stroke.setAdvanced`, `paint.editGradient`, `paint.setGradientGeom` and `transparency.set` take
-`item` to edit one of them; `run_command appearance.setActiveItem {"index": n}` makes that row the target of later
+`item` to edit one of them; `command_run appearance.setActiveItem {"index": n}` makes that row the target of later
 calls that omit `item` (as clicking the row in the Appearance panel does) until the selection changes; the proxy of
 its kind (`paint.proxies`) and the Gradient tool's annotator then show that row.
-`inspect_document` reports it as `paint.appearanceItem`. Live effects take the same `item` to apply to one fill or
-stroke instead of the whole object: `run_command effect.apply {"effect": "path.offsetPath", "item": 0}`, and
+`doc_inspect` reports it as `paint.appearanceItem`. Live effects take the same `item` to apply to one fill or
+stroke instead of the whole object: `command_run effect.apply {"effect": "path.offsetPath", "item": 0}`, and
 `effect.remove`, `effect.setParams` (`visible` toggles one) and `effect.duplicate` address that item's effects;
 `apply_effect` uses the active item. `effect.list` reports each object's item effects under `applied[].items`.
 
 Errors (unknown tool, bad arguments, a disabled or failing command) come back as a normal result with
 `isError: true` and a message. The model can read the message and retry.
 
-Swatches go through `run_command`: `swatch.list` lists every swatch with its colour group, kind and colour;
+Swatches go through `command_run`: `swatch.list` lists every swatch with its colour group, kind and colour;
 `swatch.edit {name, newName?, color?, mode?, global?, spot?}` edits one (fills, strokes and text linked to a
 global or spot swatch follow its colour and name, as one undo step); `swatch.delete {names, unlink?}` deletes
 swatches and colour groups in one undo step (art using a deleted global swatch keeps its colour, unlinked).
@@ -273,15 +269,15 @@ that theme in place). `colorTheme.list` answers `{themes: [{name, colors: [hex],
 colour group (one undo step).
 
 ```json
-{"name":"run_command","arguments":{"command":"colorTheme.save","params":{"color":"#2266aa","rule":"splitComplementary","name":"Harbor"}}}
-{"name":"run_command","arguments":{"command":"colorTheme.addToSwatches","params":{"name":"Harbor"}}}
+{"name":"command_run","arguments":{"id":"colorTheme.save","params":{"color":"#2266aa","rule":"splitComplementary","name":"Harbor"}}}
+{"name":"command_run","arguments":{"id":"colorTheme.addToSwatches","params":{"name":"Harbor"}}}
 ```
 
 SVG Options: `export` to SVG takes them in `options`, flat or as `{"svg": {…}}`: `styling` (`presentation`,
 `style`, `entities`, `css`), `outlineText`, `images` (`embed`, or `link`: embedded images are written next to the
 SVG, or returned as `linked`), `objectIds` (`layerNames`, `minimal`, `unique`), `decimals` (1–7), `minify`,
 `responsive`, `useArtboards`, `range: "all"` (one SVG per artboard, listed in `files`, each holding only the art over its artboard), `preserveEditing` (the SVG
-reopens as the full document), `metadata` and `fewerTspans` (one `<tspan>` per line of type). Unknown keys inside `svg` are rejected; `run_command document.formats`
+reopens as the full document), `metadata` and `fewerTspans` (one `<tspan>` per line of type). Unknown keys inside `svg` are rejected; `command_run document.formats`
 lists every option with its default. `encoding` is `utf8`, `utf16` (big-endian after a byte order mark) or `latin1`
 (ISO 8859-1, other characters as `&#x…;` references); `document.serialize` still answers `text`, plus `dataBase64`
 (the file) when it isn't UTF-8, and such files open again. `profile: "tiny12"` writes a simplified SVG Tiny 1.2
@@ -290,7 +286,7 @@ a warning). `embedFonts: true` embeds the fonts type uses as `@font-face` rules 
 font whose licence (OS/2 `fsType`) forbids subsetting is embedded whole, one that forbids embedding is left out
 with a warning. Type names its faces by numeric `font-weight` (600 for Semibold, 300 for Light, `bold` for 700),
 embedded or not. `svgz` takes the same options and writes the SVG gzipped (`.svgz` files also open,
-place and paste). `run_command document.save {path: "x.svg", svg: {…}}` saves as SVG (or `.svgz`).
+place and paste). `command_run document.save {path: "x.svg", svg: {…}}` saves as SVG (or `.svgz`).
 
 Symbols export as one `<symbol>` with a `<use>` per instance. An instance the def can't stand for is written as its
 own art: one stained by its fill; one scaled while the symbol has strokes (their weight doesn't scale), or rotated or
@@ -302,7 +298,7 @@ them out, and they reopen hidden. An object's own data (`object.setProps {data: 
 markup around it: if another app changed the SVG since, `document.open` reads it as plain SVG and says so in
 `warnings`.
 
-Saving beyond `save_file` goes through `run_command`: `file.saveAs {path?, format?, options?, svg?}` (the document takes
+Saving beyond `save_file` goes through `command_run`: `file.saveAs {path?, format?, options?, svg?}` (the document takes
 on the new file and format), `file.saveCopy` (the document keeps its path, title and modified state),
 `file.saveAsTemplate` (a `.vctemplate` that opens untitled; the suggested name and the Templates folder come back
 without a path), `file.newFromTemplate {path}`, `file.revert` and `file.formatOptions {format?}` (a format's options
@@ -310,8 +306,7 @@ with the values a save would use). Without a path the save commands return `{dat
 remembers its options, so the next save reuses them. A PDF opened with `pages`, `cropTo` or `password` is only part
 of the file, so Save asks for a new name instead of writing it back.
 `file.documentColorMode {mode, convert?, intent?, grays?}` switches the document colour mode, converting the colours of
-the art, symbols, pattern tiles and swatches through the colour settings (`object.convertDocumentColorMode` is an
-alias kept for older scripts). Gray colours stay Gray and print on the black plate only. RGB greys are colours like any
+the art, symbols, pattern tiles and swatches through the colour settings. Gray colours stay Gray and print on the black plate only. RGB greys are colours like any
 other: to CMYK they separate through the profile into four-colour greys and a rich black, as Illustrator converts
 them. `grays: "black"` puts RGB greys with R = G = B on the black plate instead, K = their grey value (the inks Edit Colors ›
 Convert to Grayscale before the switch would give); other colours convert as usual.
@@ -326,7 +321,7 @@ and reflected or repeated gradients (`spreadMethod`) are expanded into stops. `<
 found in the SVG's folder) stay linked images (see Linked images); SVG files and `data:` SVGs become art; a file that
 can't be read becomes a placeholder in its box, named in `warnings` and `missingLinks`.
 
-Native files: `run_command document.save {compress: true}` writes a gzip-compressed `.vectorcraft` (the
+Native files: `command_run document.save {compress: true}` writes a gzip-compressed `.vectorcraft` (the
 `useCompression` preference makes that the default for saves; compressed files open like any other, told apart by
 their content). `version: 2` or `1` writes a file older VectorCraft versions open (format name `drawcraft`, never
 compressed), and `preview: true` embeds a PNG of the first artboard, at most 256 px on its longer side. A save writes
@@ -365,16 +360,16 @@ for PNG, `interlaced`.
 Long-tail commands:
 
 ```json
-{"name":"list_commands","arguments":{"filter":"align"}}
-{"name":"run_command","arguments":{"command":"select.all"}}
-{"name":"run_command","arguments":{"command":"object.align","params":{"align":"left"}}}
-{"name":"run_command","arguments":{"command":"object.group"}}
-{"name":"run_command","arguments":{"command":"document.exportPdf","params":{"path":"/tmp/art.pdf","range":"1, 3","compatibility":"1.5"}}}
-{"name":"run_command","arguments":{"command":"document.pdfSettings","params":{"marks":{"trim":true},"includeDocument":true}}}
+{"name":"command_list","arguments":{"filter":"align"}}
+{"name":"command_run","arguments":{"id":"select.all"}}
+{"name":"command_run","arguments":{"id":"object.align","params":{"align":"left"}}}
+{"name":"command_run","arguments":{"id":"object.group"}}
+{"name":"command_run","arguments":{"id":"document.exportPdf","params":{"path":"/tmp/art.pdf","range":"1, 3","compatibility":"1.5"}}}
+{"name":"command_run","arguments":{"id":"document.pdfSettings","params":{"marks":{"trim":true},"includeDocument":true}}}
 ```
 
 PDF files take the Save PDF dialog's options: `preset`, `standard`, `compatibility`, the General toggles and the
-`compression`, `marks`, `bleed`, `output`, `advanced` and `security` sections (`list_commands` with filter `exportPdf`
+`compression`, `marks`, `bleed`, `output`, `advanced` and `security` sections (`command_list` with filter `exportPdf`
 documents every field). `document.exportPdf` and `export` (format `pdf`, the options in `options`) return `warnings`:
 options accepted but not applied yet, and features approximated or left out. A standard with a PDF version it doesn't
 allow is refused (PDF/A-2b at 1.3 or 2.0, PDF/X-4 above 1.6, PDF/X-1a and PDF/X-3 above 1.4); choosing a
@@ -431,8 +426,8 @@ CMYK too.
 (`grays` too):
 
 ```json
-{"name":"run_command","arguments":{"command":"document.pdfInfo","params":{"path":"/tmp/brochure.pdf","thumbnail":2,"cropTo":"trim"}}}
-{"name":"run_command","arguments":{"command":"document.open","params":{"path":"/tmp/brochure.pdf","pages":"2-3","cropTo":"trim"}}}
+{"name":"command_run","arguments":{"id":"document.pdfInfo","params":{"path":"/tmp/brochure.pdf","thumbnail":2,"cropTo":"trim"}}}
+{"name":"command_run","arguments":{"id":"document.open","params":{"path":"/tmp/brochure.pdf","pages":"2-3","cropTo":"trim"}}}
 ```
 
 PostScript files (`.eps`, and `.ai` files saved in older formats or without PDF compatibility) open through the EPS
@@ -458,7 +453,7 @@ or a view state that is off), print state and lock, nested as sublayers the way 
 paints under its layers, which isn't art). `layers: false` gives one layer per page of only what shows:
 
 ```json
-{"name":"run_command","arguments":{"command":"document.open","params":{"path":"/tmp/map.pdf","textAs":"outlines","layers":false}}}
+{"name":"command_run","arguments":{"id":"document.open","params":{"path":"/tmp/map.pdf","textAs":"outlines","layers":false}}}
 ```
 
 Preserve Editing (`preserveEditing`, on in the `VectorCraft Default` preset) embeds the native document in the PDF as
@@ -484,7 +479,7 @@ delete it, hold Alt to copy it), dragging the end handle changes the vector. The
 (`gradient.selectStop`) takes Delete and ←/→:
 
 ```json
-{"name":"run_command","arguments":{"command":"paint.setFill","params":{"gradient":{"start":[100,150],"end":[200,150]}}}}
+{"name":"command_run","arguments":{"id":"paint.setFill","params":{"gradient":{"start":[100,150],"end":[200,150]}}}}
 {"name":"pointer_gesture","arguments":{"tool":"gradient","events":[{"kind":"down","x":130,"y":150},{"kind":"up","x":130,"y":150}]}}
 {"name":"pointer_gesture","arguments":{"events":[{"kind":"down","x":130,"y":160},{"kind":"drag","x":160,"y":160},{"kind":"up","x":160,"y":160}]}}
 {"name":"press_key","arguments":{"key":"Delete"}}
@@ -498,7 +493,7 @@ document coordinates or `null`; `start`/`end` may be left out), and they export 
 radial shadings:
 
 ```json
-{"name":"run_command","arguments":{"command":"paint.setGradientGeom","params":{"aspect":60,"focal":[130,140]}}}
+{"name":"command_run","arguments":{"id":"paint.setGradientGeom","params":{"aspect":60,"focal":[130,140]}}}
 ```
 
 Freeform gradients: `paint.editGradient {kind: "freeform"}` places four or more colour points inside each selected
@@ -511,8 +506,8 @@ on it, a click elsewhere on the art adds a point (in Lines mode joined to the se
 selected point:
 
 ```json
-{"name":"run_command","arguments":{"command":"paint.editGradient","params":{"kind":"freeform","mode":"lines"}}}
-{"name":"run_command","arguments":{"command":"paint.freeform.addPoint","params":{"at":[150,150],"color":"#ff3366","spread":20}}}
+{"name":"command_run","arguments":{"id":"paint.editGradient","params":{"kind":"freeform","mode":"lines"}}}
+{"name":"command_run","arguments":{"id":"paint.freeform.addPoint","params":{"at":[150,150],"color":"#ff3366","spread":20}}}
 {"name":"pointer_gesture","arguments":{"tool":"gradient","events":[{"kind":"down","x":180,"y":170},{"kind":"up","x":180,"y":170}]}}
 ```
 
@@ -535,7 +530,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"draw_shape","arguments":{"shape":"ellipse","x":10,"y":10,"width":100,"height":80,"fill":"#ff0000"}}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inspect_document","arguments":{}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"doc_inspect","arguments":{}}}' \
   | target/release/vectorcraft-cli mcp --headless
 ```
 
@@ -565,10 +560,10 @@ empty mask and enters mask editing: art drawn then becomes the mask, and the mas
 until `transparency.stopEditingOpacityMask`. Saves and exports never include the editing layer.
 
 ```json
-{"name":"run_command","arguments":{"command":"transparency.set","params":{"ids":[12],"opacity":40,"blend":"Multiply"}}}
-{"name":"run_command","arguments":{"command":"transparency.makeOpacityMask","params":{"ids":[12,15],"invert":true}}}
-{"name":"run_command","arguments":{"command":"transparency.setOpacityMask","params":{"id":12,"clip":false}}}
-{"name":"run_command","arguments":{"command":"transparency.info","params":{"ids":[12,20]}}}
+{"name":"command_run","arguments":{"id":"transparency.set","params":{"ids":[12],"opacity":40,"blend":"Multiply"}}}
+{"name":"command_run","arguments":{"id":"transparency.makeOpacityMask","params":{"ids":[12,15],"invert":true}}}
+{"name":"command_run","arguments":{"id":"transparency.setOpacityMask","params":{"id":12,"clip":false}}}
+{"name":"command_run","arguments":{"id":"transparency.info","params":{"ids":[12,20]}}}
 ```
 
 Knockout Group has three states: `transparency.set {knockout: "on"|"off"|"neutral"}` (`true` = on, `false` =
@@ -603,8 +598,8 @@ A clipping path can be painted after Make (`paint.setFill`, `paint.setStroke`, `
 paints behind the clipped art and its stroke over it, not clipped, on screen and in SVG and PDF.
 
 ```json
-{"name":"run_command","arguments":{"command":"select.set","params":{"ids":[12,15]}}}
-{"name":"run_command","arguments":{"command":"object.clippingMask.make","params":{}}}
+{"name":"command_run","arguments":{"id":"select.set","params":{"ids":[12,15]}}}
+{"name":"command_run","arguments":{"id":"object.clippingMask.make","params":{}}}
 ```
 
 `layer.clippingMask.toggle {id?}` is the Layers panel's clipping mask button: the top object of the layer `id` (default:
@@ -666,10 +661,10 @@ active artboard), a guide dropped off the canvas onto its ruler is deleted, and 
 Guides) can't be picked. An artboard guide is picked, drawn and snapped to across its artboard only.
 
 ```json
-{"name":"run_command","arguments":{"command":"guide.add","params":{"vertical":true,"pos":100}}}
-{"name":"run_command","arguments":{"command":"guide.add","params":{"vertical":false,"pos":200,"artboard":0}}}
+{"name":"command_run","arguments":{"id":"guide.add","params":{"vertical":true,"pos":100}}}
+{"name":"command_run","arguments":{"id":"guide.add","params":{"vertical":false,"pos":200,"artboard":0}}}
 {"name":"pointer_gesture","arguments":{"tool":"selection","events":[{"kind":"down","x":100,"y":50},{"kind":"drag","x":140,"y":50},{"kind":"up","x":140,"y":50}]}}
-{"name":"run_command","arguments":{"command":"guide.list","params":{}}}
+{"name":"command_run","arguments":{"id":"guide.list","params":{}}}
 ```
 
 ## Graphic styles
@@ -685,10 +680,10 @@ Styles keep placed gradients relative to the bounds of the object they were made
 style is applied to gets them at the same place relative to its own bounds.
 
 ```json
-{"name":"run_command","arguments":{"command":"graphicStyle.new","params":{"id":12,"name":"Glow"}}}
-{"name":"run_command","arguments":{"command":"graphicStyle.apply","params":{"name":"Glow","ids":[15,20]}}}
-{"name":"run_command","arguments":{"command":"graphicStyle.redefine","params":{"id":12}}}
-{"name":"run_command","arguments":{"command":"graphicStyle.list","params":{}}}
+{"name":"command_run","arguments":{"id":"graphicStyle.new","params":{"id":12,"name":"Glow"}}}
+{"name":"command_run","arguments":{"id":"graphicStyle.apply","params":{"name":"Glow","ids":[15,20]}}}
+{"name":"command_run","arguments":{"id":"graphicStyle.redefine","params":{"id":12}}}
+{"name":"command_run","arguments":{"id":"graphicStyle.list","params":{}}}
 ```
 
 `graphicStyle.merge {names, name?}` adds a style stacking the fills, strokes and effects of two or more styles
@@ -718,9 +713,9 @@ graphics state with `/OP true /op true /OPM 1` (`/OPM 0` in PDF/A). With `discar
 default) white ones knock out instead; `"discard"` writes none.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.setOverprint","params":{"ids":[12],"stroke":true}}}
-{"name":"run_command","arguments":{"command":"attributes.info","params":{"ids":[12]}}}
-{"name":"run_command","arguments":{"command":"view.overprintPreview","params":{"on":true}}}
+{"name":"command_run","arguments":{"id":"object.setOverprint","params":{"ids":[12],"stroke":true}}}
+{"name":"command_run","arguments":{"id":"attributes.info","params":{"ids":[12]}}}
+{"name":"command_run","arguments":{"id":"view.overprintPreview","params":{"on":true}}}
 ```
 
 ## Edit Colors and Recolor Artwork
@@ -733,9 +728,9 @@ e.g. "Dots 2"; the original pattern is untouched). `includeImages: false` / `inc
 patterns out. The Blend commands also grade gradient meshes, which keep their shading.
 
 ```json
-{"name":"run_command","arguments":{"command":"recolor.colors","params":{}}}
-{"name":"run_command","arguments":{"command":"recolor.apply","params":{"map":{"#ff0000":"#0055ff"},"includeImages":false}}}
-{"name":"run_command","arguments":{"command":"edit.colors.adjustBalance","params":{"mode":"cmyk","m":-20,"k":10}}}
+{"name":"command_run","arguments":{"id":"recolor.colors","params":{}}}
+{"name":"command_run","arguments":{"id":"recolor.apply","params":{"map":{"#ff0000":"#0055ff"},"includeImages":false}}}
+{"name":"command_run","arguments":{"id":"edit.colors.adjustBalance","params":{"mode":"cmyk","m":-20,"k":10}}}
 ```
 
 Recolor Artwork keys colours by identity, not hex: `recolor.colors` lists each colour's `key` (`"rgb 255 0 0"`,
@@ -754,9 +749,9 @@ step (art linked to its global swatches follows), and `recolor.apply` with `grou
 group together.
 
 ```json
-{"name":"run_command","arguments":{"command":"recolor.reduce","params":{"colors":2,"preserve":{"grays":true}}}}
-{"name":"run_command","arguments":{"command":"recolor.apply","params":{"map":[{"from":["cmyk 0 100 100 0","cmyk 0 40 40 0"],"to":"cmyk 100 50 0 0"}],"method":"scaleTints"}}}
-{"name":"run_command","arguments":{"command":"swatch.editGroup","params":{"group":"Brights","colors":["#ff0000","cmyk 0 0 100 0"]}}}
+{"name":"command_run","arguments":{"id":"recolor.reduce","params":{"colors":2,"preserve":{"grays":true}}}}
+{"name":"command_run","arguments":{"id":"recolor.apply","params":{"map":[{"from":["cmyk 0 100 100 0","cmyk 0 40 40 0"],"to":"cmyk 100 50 0 0"}],"method":"scaleTints"}}}
+{"name":"command_run","arguments":{"id":"swatch.editGroup","params":{"group":"Brights","colors":["#ff0000","cmyk 0 0 100 0"]}}}
 ```
 
 ## Group, layer and type appearance
@@ -774,10 +769,10 @@ SVG and PDF export bake a group's own fills, strokes and geometry effects into p
 filter on the whole group in SVG and become an image of the whole group in PDF.
 
 ```json
-{"name":"run_command","arguments":{"command":"appearance.addFill","params":{"ids":[7]}}}
-{"name":"run_command","arguments":{"command":"appearance.moveItem","params":{"ids":[7],"from":"contents","to":1}}}
-{"name":"run_command","arguments":{"command":"effect.apply","params":{"ids":[2],"effect":"stylize.dropShadow"}}}
-{"name":"run_command","arguments":{"command":"appearance.addStroke","params":{"ids":[7],"target":"contents"}}}
+{"name":"command_run","arguments":{"id":"appearance.addFill","params":{"ids":[7]}}}
+{"name":"command_run","arguments":{"id":"appearance.moveItem","params":{"ids":[7],"from":"contents","to":1}}}
+{"name":"command_run","arguments":{"id":"effect.apply","params":{"ids":[2],"effect":"stylize.dropShadow"}}}
+{"name":"command_run","arguments":{"id":"appearance.addStroke","params":{"ids":[7],"target":"contents"}}}
 ```
 
 ## Swatch libraries
@@ -792,8 +787,8 @@ and not added again. `apply: "fill"|"stroke"` also applies the first one, in the
 swatch in the library panel does). `swatch.resetDefaults {replace?}` brings back the missing default swatches.
 
 ```json
-{"name":"run_command","arguments":{"command":"swatch.library.get","params":{"library":"earth-tones"}}}
-{"name":"run_command","arguments":{"command":"swatch.library.add","params":{"library":"earth-tones","names":["Clay"]}}}
+{"name":"command_run","arguments":{"id":"swatch.library.get","params":{"library":"earth-tones"}}}
+{"name":"command_run","arguments":{"id":"swatch.library.add","params":{"library":"earth-tones","names":["Clay"]}}}
 ```
 `swatch.library.save {path?, format?: "vcswatches"|"gpl"|"ase"|"css", names?, name?, user?}` writes the document's
 swatches as a library (`.vcswatches` keeps colour models, global, spot, gradients and colour
@@ -820,8 +815,8 @@ does. Library styles keep placed gradients in unit-box space, so each object get
 its bounds.
 
 ```json
-{"name":"run_command","arguments":{"command":"graphicStyle.library","params":{"library":"hand-drawn"}}}
-{"name":"run_command","arguments":{"command":"graphicStyle.addFromLibrary","params":{"library":"hand-drawn","name":"Crosshatch","apply":true}}}
+{"name":"command_run","arguments":{"id":"graphicStyle.library","params":{"library":"hand-drawn"}}}
+{"name":"command_run","arguments":{"id":"graphicStyle.addFromLibrary","params":{"library":"hand-drawn","name":"Crosshatch","apply":true}}}
 ```
 `graphicStyle.saveLibrary {path?, names?, name?, user?}` writes the document's styles as a `.vcstyles` library (JSON:
 the styles unlinked from swatches, with their opacity, blend mode, isolate and knockout, and the patterns they paint
@@ -850,8 +845,8 @@ to the document (numbered when its name is taken by other attributes) and applie
 undo step. `library.removeItem {library?, kind, item}` removes one.
 
 ```json
-{"name":"run_command","arguments":{"command":"library.add","params":{"kind":"graphic","name":"Logo"}}}
-{"name":"run_command","arguments":{"command":"library.use","params":{"kind":"graphic","item":"Logo","center":[300,200]}}}
+{"name":"command_run","arguments":{"id":"library.add","params":{"kind":"graphic","name":"Logo"}}}
+{"name":"command_run","arguments":{"id":"library.use","params":{"kind":"graphic","item":"Logo","center":[300,200]}}}
 ```
 
 ## Strokes on type
@@ -861,7 +856,7 @@ options go to every run (the object keeps no stroke of its own); an `item` still
 with `appearance.addStroke`, which takes every stroke option (dashes, profile, opacity, blend) like a path's and paints under or over the
 characters as its place relative to the Characters row says. To stroke
 some characters, use `text.setRangeStyle {id, start, end, strokeOptions: {weight?, cap?, join?, miterLimit?, dash?,
-dashOffset?, alignDashes?}}`. `inspect_document` reports each object's stroke as `strokeOptions` (type: its first
+dashOffset?, alignDashes?}}`. `doc_inspect` reports each object's stroke as `strokeOptions` (type: its first
 run's) in `stroke.set` terms. `stroke.set` on a group leaves the images and symbol instances in it alone.
 
 ## Inline graphics in type
@@ -902,8 +897,8 @@ override it, at the top level or in `options`. `balance: 0` rasterizes everythin
 that split into many regions. The result reports `{ids, vector, rasterized, options}`.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.flattenTransparency","params":{"ids":[12,15],"preset":"high"}}}
-{"name":"run_command","arguments":{"command":"object.flattenTransparency","params":{"balance":0,"lineArtPpi":150}}}
+{"name":"command_run","arguments":{"id":"object.flattenTransparency","params":{"ids":[12,15],"preset":"high"}}}
+{"name":"command_run","arguments":{"id":"object.flattenTransparency","params":{"balance":0,"lineArtPpi":150}}}
 ```
 
 ## Pattern editing display
@@ -913,8 +908,8 @@ In pattern editing mode the tile edge (`pattern.options {showTileEdge}`) and the
 `patternTileEdgeColor`.
 
 ```json
-{"name":"run_command","arguments":{"command":"pattern.options","params":{"showSwatchBounds":true}}}
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"key":"patternTileEdgeColor","value":"#ff4f4f"}}}
+{"name":"command_run","arguments":{"id":"pattern.options","params":{"showSwatchBounds":true}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"key":"patternTileEdgeColor","value":"#ff4f4f"}}}
 ```
 
 The Eyedropper: `appearance.copyFrom {source}` copies what the Eyedropper Options pick up and apply from `source` to the
@@ -926,8 +921,8 @@ sets them; a tree names flags under `appearance` (`transparency`, `fill` `{color
 branch sets all of it. `paint.sampleColor {color}` puts a sampled colour (in its own model) into the active proxy.
 
 ```json
-{"name":"run_command","arguments":{"command":"eyedropper.setOptions","params":{"pickUp":{"appearance":{"stroke":{"weight":false}}}}}}
-{"name":"run_command","arguments":{"command":"appearance.copyFrom","params":{"source":12,"ids":[7,8]}}}
+{"name":"command_run","arguments":{"id":"eyedropper.setOptions","params":{"pickUp":{"appearance":{"stroke":{"weight":false}}}}}}
+{"name":"command_run","arguments":{"id":"appearance.copyFrom","params":{"source":12,"ids":[7,8]}}}
 ```
 
 ## The Layers panel: rows, layers and sublayers
@@ -974,11 +969,11 @@ and `layerRows`, the rows highlighted in the panel.
   A document opens with only its top-level layers open; the open rows are saved in the native file and reopen that way.
 
 ```json
-{"name":"run_command","arguments":{"command":"layer.newSublayer","params":{"name":"Shadows"}}}
-{"name":"run_command","arguments":{"command":"layer.move","params":{"ids":[12,15],"target":7,"place":"inside"}}}
-{"name":"run_command","arguments":{"command":"layer.setProps","params":{"ids":[7],"preview":false,"color":"Orange"}}}
-{"name":"run_command","arguments":{"command":"layer.highlight","params":{"ids":[3,7]}}}
-{"name":"run_command","arguments":{"command":"layer.merge","params":{}}}
+{"name":"command_run","arguments":{"id":"layer.newSublayer","params":{"name":"Shadows"}}}
+{"name":"command_run","arguments":{"id":"layer.move","params":{"ids":[12,15],"target":7,"place":"inside"}}}
+{"name":"command_run","arguments":{"id":"layer.setProps","params":{"ids":[7],"preview":false,"color":"Orange"}}}
+{"name":"command_run","arguments":{"id":"layer.highlight","params":{"ids":[3,7]}}}
+{"name":"command_run","arguments":{"id":"layer.merge","params":{}}}
 ```
 
 ## Targeting layers and moving appearances
@@ -993,9 +988,9 @@ panel's trash is `appearance.clear {ids: [id]}`. Masked objects' names have a da
 is edited the panel lists only an `<Opacity Mask>` entry and the document tab says `(<Opacity Mask>/Opacity Mask)`.
 
 ```json
-{"name":"run_command","arguments":{"command":"layer.target","params":{"id":2}}}
-{"name":"run_command","arguments":{"command":"transparency.set","params":{"opacity":50}}}
-{"name":"run_command","arguments":{"command":"appearance.transfer","params":{"source":12,"target":2,"copy":true}}}
+{"name":"command_run","arguments":{"id":"layer.target","params":{"id":2}}}
+{"name":"command_run","arguments":{"id":"transparency.set","params":{"opacity":50}}}
+{"name":"command_run","arguments":{"id":"appearance.transfer","params":{"source":12,"target":2,"copy":true}}}
 ```
 
 ## Expand Appearance
@@ -1010,7 +1005,7 @@ the object with the image). Type with effects or fills and strokes of its own is
 fills and strokes become objects among its members, and its members are expanded too.
 
 ```json
-{"name":"run_command","arguments":{"command":"effect.expandAppearance","params":{"ids":[12]}}}
+{"name":"command_run","arguments":{"id":"effect.expandAppearance","params":{"ids":[12]}}}
 ```
 
 ## Tints of global and spot colours
@@ -1026,8 +1021,8 @@ value). `edit.colors.adjustBalance {tint: -100..100}` (Global mode) shifts the t
 colours and leaves the rest alone.
 
 ```json
-{"name":"run_command","arguments":{"command":"paint.setFill","params":{"swatch":"Ink","tint":40}}}
-{"name":"run_command","arguments":{"command":"edit.colors.adjustBalance","params":{"mode":"global","tint":-20}}}
+{"name":"command_run","arguments":{"id":"paint.setFill","params":{"swatch":"Ink","tint":40}}}
+{"name":"command_run","arguments":{"id":"edit.colors.adjustBalance","params":{"mode":"global","tint":-20}}}
 ```
 
 ## Linked gradient stops
@@ -1041,7 +1036,7 @@ paper white, 0 %) exports to PDF as a Separation shading (the writer has no Devi
 ink with other colours is written in process colours, with a warning).
 
 ```json
-{"name":"run_command","arguments":{"command":"paint.editGradient","params":{"stops":[{"offset":0,"swatch":"Ink"},{"offset":1,"swatch":"Ink","tint":20}]}}}
+{"name":"command_run","arguments":{"id":"paint.editGradient","params":{"stops":[{"offset":0,"swatch":"Ink"},{"offset":1,"swatch":"Ink","tint":20}]}}}
 ```
 
 ## Transparency flattener presets
@@ -1055,8 +1050,8 @@ dataBase64?, replace?}` adds a file's presets (names in use get a number unless 
 the preferences and work as `preset` in `object.flattenTransparency` (and anywhere else flattener options are taken).
 
 ```json
-{"name":"run_command","arguments":{"command":"flattener.presets.save","params":{"name":"Press","preset":"high","balance":60}}}
-{"name":"run_command","arguments":{"command":"object.flattenTransparency","params":{"preset":"Press"}}}
+{"name":"command_run","arguments":{"id":"flattener.presets.save","params":{"name":"Press","preset":"high","balance":60}}}
+{"name":"command_run","arguments":{"id":"object.flattenTransparency","params":{"preset":"Press"}}}
 ```
 
 ## Flattener Preview
@@ -1068,7 +1063,7 @@ and flat-colour regions, plus `regions` (bounds, and `id` for objects) for the `
 "discard"` or `"simulate"` flatten without preserving overprints.
 
 ```json
-{"name":"run_command","arguments":{"command":"flattener.preview","params":{"highlight":"allRasterized","preset":"low"}}}
+{"name":"command_run","arguments":{"id":"flattener.preview","params":{"highlight":"allRasterized","preset":"low"}}}
 ```
 
 ## Width profiles
@@ -1082,8 +1077,8 @@ right]`) and `current`, the selected stroke's profile (`"custom"` when it isn't 
 and `stroke.widthProfile.reset` removes every saved one. `stroke.set {profile}` takes a built-in id or a saved name.
 
 ```json
-{"name":"run_command","arguments":{"command":"stroke.widthProfile.add","params":{"name":"Ribbon"}}}
-{"name":"run_command","arguments":{"command":"stroke.set","params":{"ids":[9],"profile":"Ribbon"}}}
+{"name":"command_run","arguments":{"id":"stroke.widthProfile.add","params":{"name":"Ribbon"}}}
+{"name":"command_run","arguments":{"id":"stroke.set","params":{"ids":[9],"profile":"Ribbon"}}}
 ```
 
 ## Arrowheads
@@ -1115,8 +1110,8 @@ live. `object.expand.info` answers which options have something to expand in the
 stroke}`), and `object.mesh.create` on a gradient-filled object colours the mesh points as the gradient paints them.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.expand","params":{"stroke":false,"gradient":"mesh"}}}
-{"name":"run_command","arguments":{"command":"object.expand","params":{"steps":16}}}
+{"name":"command_run","arguments":{"id":"object.expand","params":{"stroke":false,"gradient":"mesh"}}}
+{"name":"command_run","arguments":{"id":"object.expand","params":{"steps":16}}}
 ```
 
 ## Lab spot colours
@@ -1130,8 +1125,8 @@ takes their working-CMYK equivalents and PDF uses a DeviceCMYK alternate. Withou
 setting.
 
 ```json
-{"name":"run_command","arguments":{"command":"swatch.new","params":{"name":"Lab Ink","color":{"l":55,"a":60,"b":40},"spot":true}}}
-{"name":"run_command","arguments":{"command":"swatch.spotOptions","params":{"useLab":false}}}
+{"name":"command_run","arguments":{"id":"swatch.new","params":{"name":"Lab Ink","color":{"l":55,"a":60,"b":40},"spot":true}}}
+{"name":"command_run","arguments":{"id":"swatch.spotOptions","params":{"useLab":false}}}
 ```
 
 ## Attributes, URLs and image maps
@@ -1144,8 +1139,8 @@ paths and compound paths, and `path.reverse {reversed?}` makes subpaths run coun
 (false). SVG export wraps an object with a URL in `<a xlink:href>`, and SVG import reads `<a href>` links back.
 
 ```json
-{"name":"run_command","arguments":{"command":"attributes.set","params":{"ids":[12],"url":"https://example.com","imageMap":"rectangle"}}}
-{"name":"run_command","arguments":{"command":"path.setFillRule","params":{"rule":"evenOdd"}}}
+{"name":"command_run","arguments":{"id":"attributes.set","params":{"ids":[12],"url":"https://example.com","imageMap":"rectangle"}}}
+{"name":"command_run","arguments":{"id":"path.setFillRule","params":{"rule":"evenOdd"}}}
 ```
 
 ## Removing anchor points
@@ -1158,8 +1153,8 @@ their facing handles are refitted so one cubic follows the two old segments; two
 `path.deleteAnchors {}` (the Delete key) deletes the selected anchors with their segments, opening closed paths there.
 
 ```json
-{"name":"run_command","arguments":{"command":"select.anchors","params":{"id":12,"anchors":[[0,1],[0,3]]}}}
-{"name":"run_command","arguments":{"command":"path.removeAnchors","params":{}}}
+{"name":"command_run","arguments":{"id":"select.anchors","params":{"id":12,"anchors":[[0,1],[0,3]]}}}
+{"name":"command_run","arguments":{"id":"path.removeAnchors","params":{}}}
 ```
 
 ## Converting and cutting anchor points
@@ -1189,9 +1184,9 @@ the path it had begun while that stays selected. Its reply's `tool` is the tool 
 ```
 
 ```json
-{"name":"run_command","arguments":{"command":"select.anchors","params":{"id":12,"anchors":[[0,2]]}}}
-{"name":"run_command","arguments":{"command":"path.cutAtAnchors","params":{}}}
-{"name":"run_command","arguments":{"command":"path.moveAnchors","params":{"dx":0,"dy":40}}}
+{"name":"command_run","arguments":{"id":"select.anchors","params":{"id":12,"anchors":[[0,2]]}}}
+{"name":"command_run","arguments":{"id":"path.cutAtAnchors","params":{}}}
+{"name":"command_run","arguments":{"id":"path.moveAnchors","params":{"dx":0,"dy":40}}}
 ```
 
 ## Registration and trim marks
@@ -1205,8 +1200,8 @@ marks that follow the object. Both use Japanese marks (double lines at the trim 
 the preference `japaneseCropMarks` is on or `style: "japanese"` is given.
 
 ```json
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"key":"japaneseCropMarks","value":true}}}
-{"name":"run_command","arguments":{"command":"object.createTrimMarks","params":{}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"key":"japaneseCropMarks","value":true}}}
+{"name":"command_run","arguments":{"id":"object.createTrimMarks","params":{}}}
 ```
 
 PDF export draws printer's marks and bleed itself (the Save PDF dialog's Marks and Bleeds section):
@@ -1219,7 +1214,7 @@ the colour bars are process, spot and black-tint patches. Layers whose Print opt
 {printable: false}`) are left out unless `includeNonPrinting` (or `createLayers`) is on.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportPdf","params":{"path":"/tmp/press.pdf","preset":"Press Quality","marks":{"trim":true,"registration":true,"colorBars":true,"pageInfo":true}}}}
+{"name":"command_run","arguments":{"id":"document.exportPdf","params":{"path":"/tmp/press.pdf","preset":"Press Quality","marks":{"trim":true,"registration":true,"colorBars":true,"pageInfo":true}}}}
 ```
 
 The Output and Advanced sections convert colours and write real text. `output: {conversion, destination}` converts
@@ -1235,7 +1230,7 @@ with a ToUnicode map (fonts whose licence forbids embedding stay outlines, with 
 true}` writes every glyph as an outline instead.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportPdf","params":{"path":"/tmp/press.pdf","output":{"conversion":"preserveNumbers","destination":"VectorCraft Generic CMYK (SWOP-like)","profiles":"destination","outputIntent":"VectorCraft Generic CMYK (SWOP-like)","trapped":true},"advanced":{"outlineText":false}}}}
+{"name":"command_run","arguments":{"id":"document.exportPdf","params":{"path":"/tmp/press.pdf","output":{"conversion":"preserveNumbers","destination":"VectorCraft Generic CMYK (SWOP-like)","profiles":"destination","outputIntent":"VectorCraft Generic CMYK (SWOP-like)","trapped":true},"advanced":{"outlineText":false}}}}
 ```
 
 ## Scale Strokes & Effects
@@ -1250,8 +1245,8 @@ changes size, and type keeps its character strokes' weight. With Scale Corners o
 size. The journal entry of a scaling command records the `strokes` and `corners` it used, so actions replay alike.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.scale","params":{"sx":200,"strokes":true}}}
-{"name":"run_command","arguments":{"command":"object.transformEach","params":{"scaleH":50,"scaleV":50,"strokes":false}}}
+{"name":"command_run","arguments":{"id":"object.scale","params":{"sx":200,"strokes":true}}}
+{"name":"command_run","arguments":{"id":"object.transformEach","params":{"scaleH":50,"scaleV":50,"strokes":false}}}
 ```
 
 ## Live Corners
@@ -1278,10 +1273,10 @@ any path. Alt-clicking one cycles their kind and double-clicking one opens Corne
 dialog `corners`: `kind`, `radius`; OK runs `object.setLiveShape`).
 
 ```json
-{"name":"run_command","arguments":{"command":"object.setLiveShape","params":{"id":12,"corners":[1],"radius":16}}}
-{"name":"run_command","arguments":{"command":"object.setLiveShape","params":{"id":12,"corners":[0,3],"radius":8,"kind":"chamfer"}}}
-{"name":"run_command","arguments":{"command":"shape.star","params":{"cx":200,"cy":200,"radius1":60,"radius2":30}}}
-{"name":"run_command","arguments":{"command":"object.setLiveShape","params":{"radius":5}}}
+{"name":"command_run","arguments":{"id":"object.setLiveShape","params":{"id":12,"corners":[1],"radius":16}}}
+{"name":"command_run","arguments":{"id":"object.setLiveShape","params":{"id":12,"corners":[0,3],"radius":8,"kind":"chamfer"}}}
+{"name":"command_run","arguments":{"id":"shape.star","params":{"cx":200,"cy":200,"radius1":60,"radius2":30}}}
+{"name":"command_run","arguments":{"id":"object.setLiveShape","params":{"radius":5}}}
 ```
 
 ## Use Preview Bounds
@@ -1294,7 +1289,7 @@ stroke (see Stroke bounds and clicks); off, they measure the paths. The three Al
 Effects off a 100 pt wide rectangle with a 10 pt stroke set to `width: 220` gets a 210 pt path.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.align","params":{"horizontal":"left","bounds":"preview"}}}
+{"name":"command_run","arguments":{"id":"object.align","params":{"horizontal":"left","bounds":"preview"}}}
 ```
 
 ## Selection preferences
@@ -1330,7 +1325,7 @@ The Selection & Anchor Display and General preferences apply to `pointer_gesture
   of a global or spot swatch; on, only the same tint.
 
 ```json
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"key":"objectSelectionByPathOnly","value":true}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"key":"objectSelectionByPathOnly","value":true}}}
 {"name":"pointer_gesture","arguments":{"tool":"selection","mods":{"cmd":true},"events":[{"kind":"down","x":175,"y":125},{"kind":"up","x":175,"y":125}]}}
 ```
 
@@ -1419,8 +1414,8 @@ Not read yet: Spacing Guides (the tools draw none).
   the Type tools (a click among the characters edits them) and the Eyedropper (`eyedropper`) are not affected.
 
 ```json
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"values":{"typeSizeIncrement":4,"trackingIncrement":50}}}}
-{"name":"run_command","arguments":{"command":"type.step","params":{"attribute":"tracking","by":-2}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"values":{"typeSizeIncrement":4,"trackingIncrement":50}}}}
+{"name":"command_run","arguments":{"id":"type.step","params":{"attribute":"tracking","by":-2}}}
 ```
 
 ## Width points
@@ -1451,14 +1446,14 @@ the centre and the end of each limb). Edit `moved`, `angles` or the lists and pa
 a pin back restores the original; every pin must be on the art's mesh, and empty lists remove the pins.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.puppetWarp.pins","params":{}}}
-{"name":"run_command","arguments":{"command":"object.puppetWarp","params":{"rest":true,"pins":[[250,150],[110,150],[390,150]],"moved":[[250,150],[110,150],[390,90]],"angles":[null,null,null]}}}
+{"name":"command_run","arguments":{"id":"object.puppetWarp.pins","params":{}}}
+{"name":"command_run","arguments":{"id":"object.puppetWarp","params":{"rest":true,"pins":[[250,150],[110,150],[390,150]],"moved":[[250,150],[110,150],[390,90]],"angles":[null,null,null]}}}
 ```
 
 ```json
-{"name":"run_command","arguments":{"command":"stroke.widthPoint.set","params":{"id":9,"t":0.5,"left":4,"right":4}}}
-{"name":"run_command","arguments":{"command":"stroke.widthPoint.set","params":{"id":9,"t":0.8,"left":12,"right":12}}}
-{"name":"run_command","arguments":{"command":"stroke.widthPoint.set","params":{"id":9,"index":1,"t":0.8,"left":4,"right":4}}}
+{"name":"command_run","arguments":{"id":"stroke.widthPoint.set","params":{"id":9,"t":0.5,"left":4,"right":4}}}
+{"name":"command_run","arguments":{"id":"stroke.widthPoint.set","params":{"id":9,"t":0.8,"left":12,"right":12}}}
+{"name":"command_run","arguments":{"id":"stroke.widthPoint.set","params":{"id":9,"index":1,"t":0.8,"left":4,"right":4}}}
 ```
 
 ## New art
@@ -1472,9 +1467,9 @@ appearance of the last selected object. `appearance.newArt` reports what the nex
 resets it.
 
 ```json
-{"name":"run_command","arguments":{"command":"select.none","params":{}}}
-{"name":"run_command","arguments":{"command":"stroke.set","params":{"cap":"round","dash":[6,3]}}}
-{"name":"run_command","arguments":{"command":"appearance.newArt","params":{}}}
+{"name":"command_run","arguments":{"id":"select.none","params":{}}}
+{"name":"command_run","arguments":{"id":"stroke.set","params":{"cap":"round","dash":[6,3]}}}
+{"name":"command_run","arguments":{"id":"appearance.newArt","params":{}}}
 ```
 
 ## Gradients on strokes
@@ -1489,7 +1484,7 @@ write it as slices of linear gradients clipped to the outline (`vectorcraft_svg:
 report warn about it).
 
 ```json
-{"name":"run_command","arguments":{"command":"paint.editGradient","params":{"stroke":true,"strokeMode":"along"}}}
+{"name":"command_run","arguments":{"id":"paint.editGradient","params":{"stroke":true,"strokeMode":"along"}}}
 ```
 
 ## Units
@@ -1499,7 +1494,7 @@ Commands take and return lengths in points (the distances of `object.path.offset
 only change what the UI shows and how it reads typed numbers. Preferences ▸ Units has
 three: General (rulers, positions and sizes, the Info panel, dialog distances, canvas measurement labels), Stroke
 (weights, dashes) and Type (font size, leading, baseline shift). General is the active document's units
-(`document.inspect` → `units`): `document.setUnits {units}` (Document Setup) sets it for that document, and
+(`document.inspect` → `units`): `document.setup {units}` (Document Setup) sets it for that document, and
 `prefs.set {key: "unitsGeneral", value}` sets it for the active document too (one undo step) and is the units
 `file.new` starts in when it gets no `units`. Stroke and Type are the preferences `unitsStroke` and `unitsType`.
 `numbersWithoutUnitsArePoints` (on by default) makes the desktop app's length fields in picas read a number typed
@@ -1512,7 +1507,7 @@ a string with a unit. Unit names: `Points`, `Picas`, `Inches`, `Millimeters`, `C
 `Meters`, `Yards`, `Feet` (the preferences use `points`, `picas`, … `feetInches`, `meters`, `yards`, `feet`).
 
 ```json
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"key":"unitsGeneral","value":"millimeters"}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"key":"unitsGeneral","value":"millimeters"}}}
 ```
 
 ## Document Setup
@@ -1522,10 +1517,10 @@ as a red outline around each artboard), the transparency grid (size and two colo
 paper colour), the flattener preset and Discard White Overprint (Overprint Preview keeps white overprints visible while
 it is on), the type options (language and its quotes, Use Typographer's Quotes for typed quotes, superscript, subscript
 and small caps proportions, SVG text export) and the background contents (white: raster exports are white behind the
-art). Pass any of these keys to change them in one undo step; `document.setUnits` stays as an alias for `units`.
+art). Pass any of these keys to change them in one undo step, including `units`.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.setup","params":{"gridColors":"Blue","gridSize":"large","language":"German","bleed":9}}}
+{"name":"command_run","arguments":{"id":"document.setup","params":{"gridColors":"Blue","gridSize":"large","language":"German","bleed":9}}}
 ```
 
 ## New Document
@@ -1539,7 +1534,7 @@ passed straight back to `file.new`. Print presets and sizes without `units` star
 (mobile, web, video, social) in Pixels.
 
 ```json
-{"name":"run_command","arguments":{"command":"file.new","params":{"preset":"A4","orientation":"landscape","artboards":4,"artboardLayout":{"columns":2},"bleed":9}}}
+{"name":"command_run","arguments":{"id":"file.new","params":{"preset":"A4","orientation":"landscape","artboards":4,"artboardLayout":{"columns":2},"bleed":9}}}
 ```
 
 ## Place
@@ -1558,9 +1553,9 @@ with `pointer_gesture` (a click places at 100% with the top-left corner there, a
 `press_key` (Left/Right/Up/Down cycle, Escape discards the current file).
 
 ```json
-{"name":"run_command","arguments":{"command":"file.place","params":{"path":"/tmp/photo.jpg","at":[300,200]}}}
-{"name":"run_command","arguments":{"command":"file.place","params":{"name":"logo.svg","dataBase64":"PHN2Zy…","rect":[0,0,100,100]}}}
-{"name":"run_command","arguments":{"command":"file.place.queue","params":{"paths":["/tmp/a.png","/tmp/b.pdf"]}}}
+{"name":"command_run","arguments":{"id":"file.place","params":{"path":"/tmp/photo.jpg","at":[300,200]}}}
+{"name":"command_run","arguments":{"id":"file.place","params":{"name":"logo.svg","dataBase64":"PHN2Zy…","rect":[0,0,100,100]}}}
+{"name":"command_run","arguments":{"id":"file.place.queue","params":{"paths":["/tmp/a.png","/tmp/b.pdf"]}}}
 {"name":"pointer_gesture","arguments":{"events":[{"kind":"down","x":40,"y":40},{"kind":"up","x":40,"y":40}]}}
 ```
 
@@ -1610,12 +1605,12 @@ Artboard) makes its handle drags proportional and passes `scaleArt`, as do Prope
 artboard size fields while the tool is in use.
 
 ```json
-{"name":"run_command","arguments":{"command":"artboard.copy","params":{"index":0}}}
-{"name":"run_command","arguments":{"command":"edit.paste","params":{}}}
-{"name":"run_command","arguments":{"command":"artboard.duplicate","params":{"index":0,"art":true}}}
-{"name":"run_command","arguments":{"command":"clipboard.conflicts","params":{}}}
-{"name":"run_command","arguments":{"command":"edit.paste","params":{"center":[300,200],"swatchConflict":{"Brand":"add"}}}}
-{"name":"run_command","arguments":{"command":"layer.pasteRemembersLayers","params":{"on":true}}}
+{"name":"command_run","arguments":{"id":"artboard.copy","params":{"index":0}}}
+{"name":"command_run","arguments":{"id":"edit.paste","params":{}}}
+{"name":"command_run","arguments":{"id":"artboard.duplicate","params":{"index":0,"art":true}}}
+{"name":"command_run","arguments":{"id":"clipboard.conflicts","params":{}}}
+{"name":"command_run","arguments":{"id":"edit.paste","params":{"center":[300,200],"swatchConflict":{"Brand":"add"}}}}
+{"name":"command_run","arguments":{"id":"layer.pasteRemembersLayers","params":{"on":true}}}
 ```
 
 ## File Info
@@ -1637,7 +1632,7 @@ journaled whichever document it ends in, and an error rolls every document back 
 it closed or reverted come back).
 
 ```json
-{"name":"run_command","arguments":{"command":"file.info","params":{"author":"Ada","keywords":"poster, fair","rating":4,"copyrightStatus":"copyrighted","copyrightNotice":"© 2026 Ada"}}}
+{"name":"command_run","arguments":{"id":"file.info","params":{"author":"Ada","keywords":"poster, fair","rating":4,"copyrightStatus":"copyrighted","copyrightNotice":"© 2026 Ada"}}}
 ```
 
 ## Document Raster Effects Settings
@@ -1654,7 +1649,7 @@ go in an image under the untouched vector art, other effects replace the object 
 fills or strokes carry effects is written as one piece per fill and stroke, so only the affected ones become images.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.rasterEffectsSettings","params":{"resolution":"high","background":"white","addAround":36}}}
+{"name":"command_run","arguments":{"id":"document.rasterEffectsSettings","params":{"resolution":"high","background":"white","addAround":36}}}
 ```
 
 ## Linked images
@@ -1679,9 +1674,9 @@ turns one into the editable copy placing without link gives, its symbols, patter
 the document; so does `object.expand`.
 
 ```json
-{"name":"run_command","arguments":{"command":"links.check","params":{}}}
-{"name":"run_command","arguments":{"command":"links.relink","params":{"ids":[12],"path":"/new/photo.png"}}}
-{"name":"run_command","arguments":{"command":"links.update","params":{}}}
+{"name":"command_run","arguments":{"id":"links.check","params":{}}}
+{"name":"command_run","arguments":{"id":"links.relink","params":{"ids":[12],"path":"/new/photo.png"}}}
+{"name":"command_run","arguments":{"id":"links.update","params":{}}}
 ```
 
 Placing a text file (`.txt`) sets it as area type: `file.place {path | name+dataBase64, text?: {characterSet?:
@@ -1692,7 +1687,7 @@ lines, `replaceSpaces: 3` turns runs of 3 or more spaces into tabs. The frame fi
 bounds, or the artboard less a 36 pt margin.
 
 ```json
-{"name":"run_command","arguments":{"command":"file.place","params":{"path":"/tmp/notes.txt","text":{"removeLineReturns":true,"removeParagraphReturns":true}}}}
+{"name":"command_run","arguments":{"id":"file.place","params":{"path":"/tmp/notes.txt","text":{"removeLineReturns":true,"removeParagraphReturns":true}}}}
 ```
 
 ## PDF presets
@@ -1708,8 +1703,8 @@ presets (names in use get a number unless `replace`). Saved presets live with th
 in `document.exportPdf`, `document.pdfSettings`, `document.export`/`serialize` with format `pdf` and `.ai` saves.
 
 ```json
-{"name":"run_command","arguments":{"command":"pdf.preset.save","params":{"name":"Web","preset":"Smallest File Size","compatibility":"1.5"}}}
-{"name":"run_command","arguments":{"command":"document.exportPdf","params":{"preset":"Web","path":"/tmp/web.pdf"}}}
+{"name":"command_run","arguments":{"id":"pdf.preset.save","params":{"name":"Web","preset":"Smallest File Size","compatibility":"1.5"}}}
+{"name":"command_run","arguments":{"id":"document.exportPdf","params":{"preset":"Web","path":"/tmp/web.pdf"}}}
 ```
 
 ## Clipboard formats
@@ -1739,10 +1734,10 @@ The `pasteTextFormatting` preference (`keep` or `plain`): with `plain`, text the
 without its formatting, taking the style at the caret.
 
 ```json
-{"name":"run_command","arguments":{"command":"clipboard.flavours","params":{}}}
-{"name":"run_command","arguments":{"command":"clipboard.exportPng","params":{"scale":2}}}
-{"name":"run_command","arguments":{"command":"clipboard.importImage","params":{"dataBase64":"iVBORw0KGgo…","center":[300,200]}}}
-{"name":"run_command","arguments":{"command":"edit.paste","params":{"center":[300,200]}}}
+{"name":"command_run","arguments":{"id":"clipboard.flavours","params":{}}}
+{"name":"command_run","arguments":{"id":"clipboard.exportPng","params":{"scale":2}}}
+{"name":"command_run","arguments":{"id":"clipboard.importImage","params":{"dataBase64":"iVBORw0KGgo…","center":[300,200]}}}
+{"name":"command_run","arguments":{"id":"edit.paste","params":{"center":[300,200]}}}
 ```
 
 ## DXF export
@@ -1769,7 +1764,7 @@ hint, and exporting to it answers with the hint to export DXF. PICT files are no
 opened.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportDxf","params":{"path":"/tmp/plan.dxf","version":"2013","unit":"mm","scale":10,"preserve":"editability"}}}
+{"name":"command_run","arguments":{"id":"document.exportDxf","params":{"path":"/tmp/plan.dxf","version":"2013","unit":"mm","scale":10,"preserve":"editability"}}}
 {"name":"export","arguments":{"path":"/tmp/plan.dxf","options":{"useArtboards":true,"colors":256}}}
 ```
 
@@ -1792,9 +1787,9 @@ transparency resolve through layers and blocks. What is left out (viewports, ima
 listed in `warnings`. Binary DXF and DWG files answer an error saying to save them as ASCII DXF.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.dxfInfo","params":{"path":"/tmp/plan.dxf"}}}
-{"name":"run_command","arguments":{"command":"document.open","params":{"path":"/tmp/plan.dxf","dxf":{"layout":"Layout1","fit":true,"mergeLayers":true}}}}
-{"name":"run_command","arguments":{"command":"file.place","params":{"path":"/tmp/detail.dxf","dxf":{"unit":"mm","scale":10,"center":false}}}}
+{"name":"command_run","arguments":{"id":"document.dxfInfo","params":{"path":"/tmp/plan.dxf"}}}
+{"name":"command_run","arguments":{"id":"document.open","params":{"path":"/tmp/plan.dxf","dxf":{"layout":"Layout1","fit":true,"mergeLayers":true}}}}
+{"name":"command_run","arguments":{"id":"file.place","params":{"path":"/tmp/detail.dxf","dxf":{"unit":"mm","scale":10,"center":false}}}}
 ```
 
 ## Links panel
@@ -1813,9 +1808,9 @@ bounds; `clip` puts it in a clip group of the old bounds when it is larger). The
 `links.reveal` open the linked file in its app or show it in its folder (desktop).
 
 ```json
-{"name":"run_command","arguments":{"command":"links.list","params":{"show":"missing"}}}
-{"name":"run_command","arguments":{"command":"links.placementOptions","params":{"ids":[12],"preserve":"fit","align":"top"}}}
-{"name":"run_command","arguments":{"command":"links.unembed","params":{"id":14,"path":"/tmp/logo.png"}}}
+{"name":"command_run","arguments":{"id":"links.list","params":{"show":"missing"}}}
+{"name":"command_run","arguments":{"id":"links.placementOptions","params":{"ids":[12],"preserve":"fit","align":"top"}}}
+{"name":"command_run","arguments":{"id":"links.unembed","params":{"id":14,"path":"/tmp/logo.png"}}}
 ```
 
 ## Package and Document Info
@@ -1833,8 +1828,8 @@ embeddedImages); `format: "text"` returns the plain-text report Document Info �
 the package report write.
 
 ```json
-{"name":"run_command","arguments":{"command":"file.package","params":{"folder":"/tmp/handoff","copyFonts":false}}}
-{"name":"run_command","arguments":{"command":"document.info","params":{"format":"text","category":"fontDetails"}}}
+{"name":"command_run","arguments":{"id":"file.package","params":{"folder":"/tmp/handoff","copyFonts":false}}}
+{"name":"command_run","arguments":{"id":"document.info","params":{"format":"text","category":"fontDetails"}}}
 ```
 
 ## Slices
@@ -1857,9 +1852,9 @@ into), `object.slice.fromSelection`, `object.slice.duplicate {dx?, dy?}`, `objec
 the `sliceLineColor` preference, numbered while `showSliceNumbers` is on.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.slice.make","params":{}}}
-{"name":"run_command","arguments":{"command":"object.slice.options","params":{"name":"logo","url":"https://example.com","alt":"Logo"}}}
-{"name":"run_command","arguments":{"command":"slice.list","params":{}}}
+{"name":"command_run","arguments":{"id":"object.slice.make","params":{}}}
+{"name":"command_run","arguments":{"id":"object.slice.options","params":{"name":"logo","url":"https://example.com","alt":"Logo"}}}
+{"name":"command_run","arguments":{"id":"slice.list","params":{}}}
 ```
 
 The Slice tool (`slice`, Shift+K) and the Slice Selection tool (`sliceSelection`) reduce to commands:
@@ -1869,8 +1864,8 @@ The Slice tool (`slice`, Shift+K) and the Slice Selection tool (`sliceSelection`
 slice ids and the ids of objects with an object slice.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.slice.create","params":{"x":0,"y":0,"width":200,"height":80}}}
-{"name":"run_command","arguments":{"command":"object.slice.move","params":{"dx":10,"dy":0}}}
+{"name":"command_run","arguments":{"id":"object.slice.create","params":{"x":0,"y":0,"width":200,"height":80}}}
+{"name":"command_run","arguments":{"id":"object.slice.move","params":{"dx":10,"dy":0}}}
 ```
 
 ## Export for Screens
@@ -1886,9 +1881,9 @@ sub-folders) replaces the rows, and `settings: {png: {…}, jpg: {…}, svg: {�
 format its options. The document remembers the last params: `document.exportSettings`.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportForScreens","params":{"preset":"density","zip":true}}}
-{"name":"run_command","arguments":{"command":"document.exportForScreens","params":{"range":"1-2","formats":[{"format":"png","scale":"512w"},{"format":"jpg","quality":80,"scale":"2x"},{"format":"svg"}],"settings":{"png":{"background":"white"}}}}}
-{"name":"run_command","arguments":{"command":"document.exportSettings","params":{}}}
+{"name":"command_run","arguments":{"id":"document.exportForScreens","params":{"preset":"density","zip":true}}}
+{"name":"command_run","arguments":{"id":"document.exportForScreens","params":{"range":"1-2","formats":[{"format":"png","scale":"512w"},{"format":"jpg","quality":80,"scale":"2x"},{"format":"svg"}],"settings":{"png":{"background":"white"}}}}}
+{"name":"command_run","arguments":{"id":"document.exportSettings","params":{}}}
 ```
 
 ## EPS export
@@ -1912,7 +1907,7 @@ linked images whole when `includeLinkedFiles`), so a later EPS import can reopen
 Screens doesn't write EPS.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportEps","params":{"path":"/tmp/logo.eps","level":2,"previewFormat":"tiffBw","flattenerPreset":"high"}}}
+{"name":"command_run","arguments":{"id":"document.exportEps","params":{"path":"/tmp/logo.eps","level":2,"previewFormat":"tiffBw","flattenerPreset":"high"}}}
 {"name":"export","arguments":{"path":"/tmp/art.eps","options":{"useArtboards":true,"cmykPostScript":false}}}
 ```
 
@@ -1924,7 +1919,7 @@ answers what it would print without writing it: `{pages (copies included), sheet
 height, orientation, scale}] (one copy, in order), tiles: [{artboard, columns, rows, printed, tiles}] (document
 space), inks: [{name, spot, print, frequency, angle}], warnings, settings}`. `print.setup {settings?}` saves the
 settings with the document (one undo step, kept in the native file as `print_setup`); both other commands start from
-the saved settings, with `settings` over them (`null` keeps a value). `list_commands` with filter `print.setup`
+the saved settings, with `settings` over them (`null` keeps a value). `command_list` with filter `print.setup`
 documents every field:
 
 - General: `copies` (1–999), `collate`, `reverse`; `artboards: all|range|ignore` with `range: "1-3, 5"` (ignore: all
@@ -1946,9 +1941,9 @@ Halftone screens and a fixed flatness are not written to the PDF (the output dev
 as they do for art larger than the imageable area.
 
 ```json
-{"name":"run_command","arguments":{"command":"print.setup","params":{"settings":{"media":"a4","scaling":"fit","marks":{"trim":true}}}}}
-{"name":"run_command","arguments":{"command":"print.preview","params":{"settings":{"output":{"mode":"separations"}}}}}
-{"name":"run_command","arguments":{"command":"file.print","params":{"path":"/tmp/job.pdf","settings":{"copies":2}}}}
+{"name":"command_run","arguments":{"id":"print.setup","params":{"settings":{"media":"a4","scaling":"fit","marks":{"trim":true}}}}}
+{"name":"command_run","arguments":{"id":"print.preview","params":{"settings":{"output":{"mode":"separations"}}}}}
+{"name":"command_run","arguments":{"id":"file.print","params":{"path":"/tmp/job.pdf","settings":{"copies":2}}}}
 ```
 
 Print to a PostScript file: `file.print {format: "postscript"}` (the default for a `.ps` path) writes the same job as
@@ -1960,7 +1955,7 @@ DSC: `%%Pages` is the page count (copies included), each `%%Page` sets its paper
 is flattened first with `flattenerPreset` (`medium` by default; `high`, `low` or a saved one), with a warning.
 
 ```json
-{"name":"run_command","arguments":{"command":"file.print","params":{"path":"/tmp/job.ps","level":2,"settings":{"output":{"mode":"separations"}}}}}
+{"name":"command_run","arguments":{"id":"file.print","params":{"path":"/tmp/job.ps","level":2,"settings":{"output":{"mode":"separations"}}}}}
 ```
 
 ## Data Recovery
@@ -1987,9 +1982,9 @@ their original file); the copy moves into this app's area. `file.recovery.discar
 folder or browser storage the commands are disabled and say how to set one.
 
 ```json
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"key":"recoveryFolder","value":"/tmp/vc-recovery"}}}
-{"name":"run_command","arguments":{"command":"file.recovery.save","params":{}}}
-{"name":"run_command","arguments":{"command":"file.recovery.restore","params":{"file":"1759650000-1/Poster-1"}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"key":"recoveryFolder","value":"/tmp/vc-recovery"}}}
+{"name":"command_run","arguments":{"id":"file.recovery.save","params":{}}}
+{"name":"command_run","arguments":{"id":"file.recovery.restore","params":{"file":"1759650000-1/Poster-1"}}}
 ```
 
 ## Native save options
@@ -2011,8 +2006,8 @@ File → Save As asks for these in the save options dialog (VectorCraft Options)
 and Save as Template reuse the options as last saved (or Use Compression).
 
 ```json
-{"name":"run_command","arguments":{"command":"file.saveAs","params":{"path":"/tmp/set.vectorcraft","separateArtboards":true,"range":"2-3","includeLinked":true}}}
-{"name":"run_command","arguments":{"command":"file.saveAs","params":{"path":"/tmp/set.ai","pdfCompatible":false}}}
+{"name":"command_run","arguments":{"id":"file.saveAs","params":{"path":"/tmp/set.vectorcraft","separateArtboards":true,"range":"2-3","includeLinked":true}}}
+{"name":"command_run","arguments":{"id":"file.saveAs","params":{"path":"/tmp/set.ai","pdfCompatible":false}}}
 ```
 
 ## EMF and WMF
@@ -2036,8 +2031,8 @@ clipboard service offers it (the Windows desktop service doesn't read metafiles 
 
 ```json
 {"name":"export","arguments":{"path":"/tmp/logo.emf"}}
-{"name":"run_command","arguments":{"command":"document.export","params":{"format":"wmf","useArtboards":true,"path":"/tmp/icons.wmf"}}}
-{"name":"run_command","arguments":{"command":"file.place","params":{"path":"/tmp/chart.emf","at":[300,200]}}}
+{"name":"command_run","arguments":{"id":"document.export","params":{"format":"wmf","useArtboards":true,"path":"/tmp/icons.wmf"}}}
+{"name":"command_run","arguments":{"id":"file.place","params":{"path":"/tmp/chart.emf","at":[300,200]}}}
 ```
 
 ## TIFF, BMP and Targa export
@@ -2055,7 +2050,7 @@ on white. TIFF and BMP files open again; `document.formats` lists every option.
 
 ```json
 {"name":"export","arguments":{"path":"/tmp/print.tif","options":{"ppi":300,"colorModel":"cmyk","byteOrder":"big"}}}
-{"name":"run_command","arguments":{"command":"document.export","params":{"format":"bmp","depth":8,"rle":true}}}
+{"name":"command_run","arguments":{"id":"document.export","params":{"format":"bmp","depth":8,"rle":true}}}
 {"name":"export","arguments":{"path":"/tmp/sprite.tga","options":{"depth":32}}}
 ```
 
@@ -2084,9 +2079,9 @@ given). `webExport.settings {…}` remembers the settings the dialog opens on (`
 defaults); presets and remembered settings are preferences.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportForWeb.preview","params":{"format":"gif","colors":32,"dither":"none"}}}
-{"name":"run_command","arguments":{"command":"document.exportForWeb","params":{"path":"/tmp/web/page.html","format":"png8","output":"html"}}}
-{"name":"run_command","arguments":{"command":"webExport.presets.save","params":{"name":"Banner","format":"jpg","quality":70}}}
+{"name":"command_run","arguments":{"id":"document.exportForWeb.preview","params":{"format":"gif","colors":32,"dither":"none"}}}
+{"name":"command_run","arguments":{"id":"document.exportForWeb","params":{"path":"/tmp/web/page.html","format":"png8","output":"html"}}}
+{"name":"command_run","arguments":{"id":"webExport.presets.save","params":{"name":"Banner","format":"jpg","quality":70}}}
 ```
 
 ## Asset Export
@@ -2106,9 +2101,9 @@ those shared settings (not an undo step). `document.exportForScreens {assets: [i
 (the dialog's Assets tab).
 
 ```json
-{"name":"run_command","arguments":{"command":"assets.add","params":{"multiple":true}}}
-{"name":"run_command","arguments":{"command":"assets.settings.set","params":{"formats":[{"format":"png","scale":"1x"},{"format":"png","scale":"2x"},{"format":"svg"}]}}}
-{"name":"run_command","arguments":{"command":"assets.export","params":{"zip":true}}}
+{"name":"command_run","arguments":{"id":"assets.add","params":{"multiple":true}}}
+{"name":"command_run","arguments":{"id":"assets.settings.set","params":{"formats":[{"format":"png","scale":"1x"},{"format":"png","scale":"2x"},{"format":"svg"}]}}}
+{"name":"command_run","arguments":{"id":"assets.export","params":{"zip":true}}}
 ```
 
 ## CSS Properties
@@ -2127,8 +2122,8 @@ writes the `.css` file with the PNGs of rasterized art next to it (no path: `dat
 `css.copy` copies the CSS and `css.exportFile` writes it through a save panel (the web downloads it).
 
 ```json
-{"name":"run_command","arguments":{"command":"css.selection","params":{"units":"px","position":true}}}
-{"name":"run_command","arguments":{"command":"css.export","params":{"path":"/tmp/site/styles.css","scope":"all","rasterize":true}}}
+{"name":"command_run","arguments":{"id":"css.selection","params":{"units":"px","position":true}}}
+{"name":"command_run","arguments":{"id":"css.export","params":{"path":"/tmp/site/styles.css","scope":"all","rasterize":true}}}
 ```
 
 ## PSD export
@@ -2146,7 +2141,7 @@ drawn. Files are at most 30000 pixels a side; PSD files don't open in VectorCraf
 
 ```json
 {"name":"export","arguments":{"path":"/tmp/poster.psd","options":{"ppi":300,"maxEditability":true}}}
-{"name":"run_command","arguments":{"command":"document.export","params":{"format":"psd","layers":false,"colorModel":"cmyk"}}}
+{"name":"command_run","arguments":{"id":"document.export","params":{"format":"psd","layers":false,"colorModel":"cmyk"}}}
 ```
 
 ## Printing
@@ -2162,9 +2157,9 @@ dialog, and with params it prints through the system (`printer`: a name from `pr
 default printer) or, with `toFile`, a `path` or no printing available, saves the PDF.
 
 ```json
-{"name":"run_command","arguments":{"command":"print.setup","params":{"settings":{"media":"a4","scaling":"fit","marks":{"trim":true}}}}}
-{"name":"run_command","arguments":{"command":"print.preview","params":{"settings":{"copies":2,"output":{"mode":"separations"}}}}}
-{"name":"run_command","arguments":{"command":"file.print","params":{"path":"/tmp/job.pdf"}}}
+{"name":"command_run","arguments":{"id":"print.setup","params":{"settings":{"media":"a4","scaling":"fit","marks":{"trim":true}}}}}
+{"name":"command_run","arguments":{"id":"print.preview","params":{"settings":{"copies":2,"output":{"mode":"separations"}}}}}
+{"name":"command_run","arguments":{"id":"file.print","params":{"path":"/tmp/job.pdf"}}}
 ```
 
 ## Print presets
@@ -2179,7 +2174,7 @@ unless `replace`). Saved presets live with the preferences. To print with a pres
 `print.setup`, `print.preview` or `file.print`.
 
 ```json
-{"name":"run_command","arguments":{"command":"print.presets.save","params":{"name":"Posters","settings":{"scaling":"tileImageable","overlap":18,"marks":{"trim":true}}}}}
+{"name":"command_run","arguments":{"id":"print.presets.save","params":{"name":"Posters","settings":{"scaling":"tileImageable","overlap":18,"marks":{"trim":true}}}}}
 ```
 
 ## EPS and PostScript import
@@ -2206,8 +2201,8 @@ too) with a warning; without a preview, the art drawn up to the error is kept wi
 refused with a message saying why.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.open","params":{"path":"/tmp/logo.eps"}}}
-{"name":"run_command","arguments":{"command":"file.place","params":{"path":"/tmp/logo.eps","at":[300,300]}}}
+{"name":"command_run","arguments":{"id":"document.open","params":{"path":"/tmp/logo.eps"}}}
+{"name":"command_run","arguments":{"id":"file.place","params":{"path":"/tmp/logo.eps","at":[300,300]}}}
 ```
 
 ## PDF/X
@@ -2233,7 +2228,7 @@ its standard: what it still breaks (transparency, RGB in PDF/X-1a, a font not em
 writing a file that only claims the standard.
 
 ```json
-{"name":"run_command","arguments":{"command":"document.exportPdf","params":{"path":"/tmp/press.pdf","preset":"PDF/X-1a:2001","output":{"outputIntent":"VectorCraft Generic CMYK (SWOP-like)","outputCondition":"Coated","trapped":false}}}}
+{"name":"command_run","arguments":{"id":"document.exportPdf","params":{"path":"/tmp/press.pdf","preset":"PDF/X-1a:2001","output":{"outputIntent":"VectorCraft Generic CMYK (SWOP-like)","outputCondition":"Coated","trapped":false}}}}
 ```
 
 ## Print tiling
@@ -2253,9 +2248,9 @@ the tool's button, runs `print.tiling.set {reset: true}`: the placement places t
 the placement then shows as placed by the tool, with a Reset button; dragging the preview moves the origin.
 
 ```json
-{"name":"run_command","arguments":{"command":"view.printTiling","params":{"on":true}}}
-{"name":"run_command","arguments":{"command":"print.tiling.set","params":{"origin":[-36,-36]}}}
-{"name":"run_command","arguments":{"command":"print.tiling","params":{"settings":{"scaling":"tileImageable","scale":{"width":300,"height":300}}}}}
+{"name":"command_run","arguments":{"id":"view.printTiling","params":{"on":true}}}
+{"name":"command_run","arguments":{"id":"print.tiling.set","params":{"origin":[-36,-36]}}}
+{"name":"command_run","arguments":{"id":"print.tiling","params":{"settings":{"scaling":"tileImageable","scale":{"width":300,"height":300}}}}}
 ```
 
 ## Print advanced options
@@ -2274,7 +2269,7 @@ colours keep their numbers with `preserveNumbers`), so a CMYK profile writes dev
 CMYK one. Settings saved before these options load with their defaults.
 
 ```json
-{"name":"run_command","arguments":{"command":"file.print","params":{"path":"/tmp/proof.pdf","settings":{"advanced":{"overprints":"simulate","flattenerPreset":"High Resolution"},"color":{"profile":"VectorCraft Generic CMYK (SWOP-like)","intent":"perceptual"}}}}}
+{"name":"command_run","arguments":{"id":"file.print","params":{"path":"/tmp/proof.pdf","settings":{"advanced":{"overprints":"simulate","flattenerPreset":"High Resolution"},"color":{"profile":"VectorCraft Generic CMYK (SWOP-like)","intent":"perceptual"}}}}}
 ```
 
 ### Rotated bounding boxes
@@ -2288,7 +2283,7 @@ point along the turned box (x, y stay page coordinates). Objects turned together
 square to the page. `object.resetBoundingBox` squares the box again without moving the art.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.rotate","params":{"angle":45,"absolute":true}}}
+{"name":"command_run","arguments":{"id":"object.rotate","params":{"angle":45,"absolute":true}}}
 ```
 
 ## Select All while editing type
@@ -2313,7 +2308,7 @@ its undo history are as if the click never happened. Commands on the edited text
 (Object → Path → Clean Up removes empty text).
 
 ```json
-{"name":"run_command","arguments":{"command":"text.discardEmpty","params":{"id":42}}}
+{"name":"command_run","arguments":{"id":"text.discardEmpty","params":{"id":42}}}
 ```
 
 ## Resizing area type
@@ -2327,7 +2322,7 @@ frame anchors with their handles (Direct Selection dragging a corner, or an edge
 undo step. Object › Transform › Scale, the Scale tool and the Transform panel still scale the type.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.reshapeArea","params":{"id":42,"anchors":[[0,2]],"dx":40,"dy":60}}}
+{"name":"command_run","arguments":{"id":"text.reshapeArea","params":{"id":42,"anchors":[[0,2]],"dx":40,"dy":60}}}
 ```
 
 ### Vertical alignment
@@ -2343,7 +2338,7 @@ top-aligned. Vertical type aligns along its block axis (`bottom` is the frame's 
 again, so SVG, PDF and EPS show the aligned text.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.areaOptions","params":{"verticalAlign":"center"}}}
+{"name":"command_run","arguments":{"id":"text.areaOptions","params":{"verticalAlign":"center"}}}
 ```
 
 ## Fitting area type: Auto Size, Shrink Text to Fit, overflow
@@ -2371,7 +2366,7 @@ command also accepts that object form. The query (and every reply) of `text.area
 the end of the path), and `fit` and `fitScale` for area type.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.areaOptions","params":{"fit":"shrinkText","fitMinPercent":60}}}
+{"name":"command_run","arguments":{"id":"text.areaOptions","params":{"fit":"shrinkText","fitMinPercent":60}}}
 ```
 
 ## Converting between point type and area type
@@ -2384,7 +2379,7 @@ Type and Convert To Point Type. Either keeps the text and its styles and is one 
 (default: the selection).
 
 ```json
-{"name":"run_command","arguments":{"command":"type.convertToAreaType","params":{"ids":[42]}}}
+{"name":"command_run","arguments":{"id":"type.convertToAreaType","params":{"ids":[42]}}}
 ```
 
 ## Kinsoku Set
@@ -2397,7 +2392,7 @@ JLREQ's level 3 line-breaking rules do (https://www.w3.org/TR/jlreq/#addendum_a3
 **None** applies no kinsoku. `hard` isn't saved. One undo step.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.setFormat","params":{"kinsoku":"soft"}}}
+{"name":"command_run","arguments":{"id":"text.setFormat","params":{"kinsoku":"soft"}}}
 ```
 
 ## Hanging punctuation (burasagari)
@@ -2411,7 +2406,7 @@ they are. The hanging mark is as wide as its punctuation spacing makes it (`moji
 undo step.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.setFormat","params":{"burasagari":"forced"}}}
+{"name":"command_run","arguments":{"id":"text.setFormat","params":{"burasagari":"forced"}}}
 ```
 
 ## Character Alignment
@@ -2424,7 +2419,7 @@ vertical type top and bottom are the right and left of the column. The ICF comes
 without ideographs uses its em box. One undo step.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.setFormat","params":{"charAlign":"icfTop"}}}
+{"name":"command_run","arguments":{"id":"text.setFormat","params":{"charAlign":"icfTop"}}}
 ```
 
 ## New type in a Japanese interface
@@ -2437,7 +2432,7 @@ in other languages it starts on the Roman baseline (#432). This covers the Type 
 same in any language. Saved documents keep what they say, and imported text (PDF, SVG, DXF…) keeps the Roman baseline.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.create","params":{"x":40,"y":60,"text":"雅楽","leadingModel":"emBoxTop","charAlign":"emBoxCenter"}}}
+{"name":"command_run","arguments":{"id":"text.create","params":{"x":40,"y":60,"text":"雅楽","leadingModel":"emBoxTop","charAlign":"emBoxCenter"}}}
 ```
 
 ## Moving and flipping type on a path
@@ -2456,7 +2451,7 @@ begins or ends, dragging the centre bracket slides the type along its path and, 
 (with Cmd/Ctrl held it only slides). Each is one undo step.
 
 ```json
-{"name":"run_command","arguments":{"command":"type.pathOptions","params":{"start":0.25,"end":0.75,"flip":true}}}
+{"name":"command_run","arguments":{"id":"type.pathOptions","params":{"start":0.25,"end":0.75,"flip":true}}}
 ```
 
 ## Paragraph attributes per paragraph
@@ -2480,9 +2475,9 @@ centred or right-aligned line on its own (`<tspan text-anchor>`), and SVG import
 alignment back, with indents that keep it in place.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.setStyle","params":{"id":42,"justify":"center","start":0,"end":0}}}
-{"name":"run_command","arguments":{"command":"text.setFormat","params":{"ids":[42],"spaceBefore":6,"start":12,"end":30}}}
-{"name":"run_command","arguments":{"command":"paraStyle.apply","params":{"name":"Heading","id":42,"start":0,"end":0}}}
+{"name":"command_run","arguments":{"id":"text.setStyle","params":{"id":42,"justify":"center","start":0,"end":0}}}
+{"name":"command_run","arguments":{"id":"text.setFormat","params":{"ids":[42],"spaceBefore":6,"start":12,"end":30}}}
+{"name":"command_run","arguments":{"id":"paraStyle.apply","params":{"name":"Heading","id":42,"start":0,"end":0}}}
 ```
 
 ## Constrain proportions
@@ -2492,8 +2487,8 @@ The link between W and H in the Transform panel, the Properties panel and the Co
 to `object.setBounds`, which scales the other dimension by the same factor; agents pass `proportional` themselves.
 
 ```json
-{"name":"run_command","arguments":{"command":"prefs.set","params":{"key":"constrainProportions","value":true}}}
-{"name":"run_command","arguments":{"command":"object.setBounds","params":{"width":200,"proportional":true}}}
+{"name":"command_run","arguments":{"id":"prefs.set","params":{"key":"constrainProportions","value":true}}}
+{"name":"command_run","arguments":{"id":"object.setBounds","params":{"width":200,"proportional":true}}}
 ```
 
 ## Plug-ins
@@ -2506,9 +2501,9 @@ id `plugin.<id>`: `effect.apply`, `effect.setParams` and `effect.expandAppearanc
 `effect.list` lists it. A failing plug-in returns an error and leaves the document as it was.
 
 ```json
-{"name":"run_command","arguments":{"command":"plugin.install","params":{"path":"/plugins/desaturate.wasm"}}}
-{"name":"run_command","arguments":{"command":"plugin.run","params":{"id":"org.vectorcraft.example.desaturate","params":{"amount":60}}}}
-{"name":"run_command","arguments":{"command":"effect.apply","params":{"effect":"plugin.org.example.wobble","params":{"size":4}}}}
+{"name":"command_run","arguments":{"id":"plugin.install","params":{"path":"/plugins/desaturate.wasm"}}}
+{"name":"command_run","arguments":{"id":"plugin.run","params":{"id":"org.vectorcraft.example.desaturate","params":{"amount":60}}}}
+{"name":"command_run","arguments":{"id":"effect.apply","params":{"effect":"plugin.org.example.wobble","params":{"size":4}}}}
 ```
 
 ## Colour adjustments
@@ -2528,7 +2523,7 @@ effects keep their colours.
 tone (mono, or CMYK screens multiplied over each other), clipped to the art's outline by default:
 
 ```json
-{"name":"run_command","arguments":{"command":"object.vectorHalftone","params":{"shape":"circle","frequency":25,"angle":45,"mode":"cmyk"}}}
+{"name":"command_run","arguments":{"id":"object.vectorHalftone","params":{"shape":"circle","frequency":25,"angle":45,"mode":"cmyk"}}}
 ```
 
 ## Fonts
@@ -2553,9 +2548,9 @@ font that became available redraws in it, without editing the document. The app 
 comes to the front and a font folder changed meanwhile.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.fontList","params":{}}}
-{"name":"run_command","arguments":{"command":"text.fontList","params":{"family":"Source Serif 4"}}}
-{"name":"run_command","arguments":{"command":"text.rescanFonts","params":{}}}
+{"name":"command_run","arguments":{"id":"text.fontList","params":{}}}
+{"name":"command_run","arguments":{"id":"text.fontList","params":{"family":"Source Serif 4"}}}
+{"name":"command_run","arguments":{"id":"text.rescanFonts","params":{}}}
 ```
 
 ## Tool options
@@ -2569,7 +2564,7 @@ polygon sides and star points. The Liquify tools share one set of Global Brush D
 intensity), and the Symbolism tools one brush. Interaction state (pins, a reference point) starts afresh.
 
 ```json
-{"name":"run_command","arguments":{"command":"tool.setOption","params":{"tool":"twirl","values":{"width":60,"rate":90}}}}
+{"name":"command_run","arguments":{"id":"tool.setOption","params":{"tool":"twirl","values":{"width":60,"rate":90}}}}
 ```
 
 ## Perspective grid
@@ -2586,8 +2581,8 @@ points around the station point, which stays put. In two- and three-point grids 
 the viewing angle, so the vanishing points sit at `x − distance/tan(angle)` and `x + distance·tan(angle)`.
 
 ```json
-{"name":"run_command","arguments":{"command":"perspective.grid.get","params":{}}}
-{"name":"run_command","arguments":{"command":"perspective.grid.define","params":{"units":"inches","gridline":0.5,"angle":30,"distance":6,"horizonHeight":3}}}
+{"name":"command_run","arguments":{"id":"perspective.grid.get","params":{}}}
+{"name":"command_run","arguments":{"id":"perspective.grid.define","params":{"units":"inches","gridline":0.5,"angle":30,"distance":6,"horizonHeight":3}}}
 ```
 
 Perspective grid presets: `perspective.presets.list` lists the built-in views (`[1P-Normal View]`, `[1P-Low View]`,
@@ -2601,8 +2596,8 @@ document's grid (View → Perspective Grid → Save Grid as Preset). `perspectiv
 preferences, and a grid whose fields are a preset's is named after it (`name`).
 
 ```json
-{"name":"run_command","arguments":{"command":"perspective.grid.preset","params":{"name":"[2P-Low View]"}}}
-{"name":"run_command","arguments":{"command":"perspective.presets.save","params":{"name":"Street","units":"feet","scale":[1,48],"gridline":1}}}
+{"name":"command_run","arguments":{"id":"perspective.grid.preset","params":{"name":"[2P-Low View]"}}}
+{"name":"command_run","arguments":{"id":"perspective.presets.save","params":{"name":"Street","units":"feet","scale":[1,48],"gridline":1}}}
 ```
 
 Perspective grid view options (View → Perspective Grid; view state saved with the document, no undo step, each
@@ -2656,10 +2651,10 @@ frame (`kind.frame` in `document.inspect`; rotating a warp envelope turns the wa
 it square to the page.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.envelope.makeWithWarp","params":{"style":"arch","bend":40}}}
-{"name":"run_command","arguments":{"command":"object.envelope.resetWithMesh","params":{"rows":3,"cols":3,"maintainShape":true}}}
-{"name":"run_command","arguments":{"command":"object.envelope.options","params":{"fidelity":80,"distortAppearance":true,"distortLinearGradients":true}}}
-{"name":"run_command","arguments":{"command":"object.envelope.info","params":{}}}
+{"name":"command_run","arguments":{"id":"object.envelope.makeWithWarp","params":{"style":"arch","bend":40}}}
+{"name":"command_run","arguments":{"id":"object.envelope.resetWithMesh","params":{"rows":3,"cols":3,"maintainShape":true}}}
+{"name":"command_run","arguments":{"id":"object.envelope.options","params":{"fidelity":80,"distortAppearance":true,"distortLinearGradients":true}}}
+{"name":"command_run","arguments":{"id":"object.envelope.info","params":{}}}
 ```
 
 ## Liquify tools
@@ -2675,9 +2670,9 @@ its current size (with Shift too it keeps its proportions). With Use Pressure Pe
 `pressure` (0..1) is the intensity there, and `object.liquify` takes points as `[x, y, pressure]`.
 
 ```json
-{"name":"run_command","arguments":{"command":"tool.setOption","params":{"tool":"bloat","values":{"width":80,"height":80,"usePressure":true}}}}
+{"name":"command_run","arguments":{"id":"tool.setOption","params":{"tool":"bloat","values":{"width":80,"height":80,"usePressure":true}}}}
 {"name":"pointer_gesture","arguments":{"tool":"bloat","events":[{"kind":"down","x":280,"y":150,"pressure":0.3},{"kind":"drag","x":280,"y":200,"pressure":0.8},{"kind":"up","x":280,"y":250}]}}
-{"name":"run_command","arguments":{"command":"object.liquify","params":{"tool":"scallop","points":[[300,150],[300,250]],"complexity":3,"affectAnchors":false}}}
+{"name":"command_run","arguments":{"id":"object.liquify","params":{"tool":"scallop","points":[[300,150],[300,250]],"complexity":3,"affectAnchors":false}}}
 ```
 
 Holding the brush still keeps Twirl, Pucker and Bloat working, scaled by the time held: every tenth of a second the
@@ -2707,8 +2702,8 @@ copies). Object › Transform › Transform Again repeats the last perspective m
 {"name":"pointer_gesture","arguments":{"tool":"perspectiveSelection","events":[{"kind":"down","x":480,"y":410},{"kind":"drag","x":470,"y":405}]}}
 {"name":"press_key","arguments":{"key":"5"}}
 {"name":"pointer_gesture","arguments":{"events":[{"kind":"up","x":470,"y":405}]}}
-{"name":"run_command","arguments":{"command":"perspective.transform","params":{"matrix":[1.5,0,0,1.5,0,0],"copy":true}}}
-{"name":"run_command","arguments":{"command":"object.transformAgain","params":{}}}
+{"name":"command_run","arguments":{"id":"perspective.transform","params":{"matrix":[1.5,0,0,1.5,0,0],"copy":true}}}
+{"name":"command_run","arguments":{"id":"object.transformAgain","params":{}}}
 ```
 
 Planes move along their normals: `perspective.plane.move {plane, offset | by, objects}` (`leftOffset`,
@@ -2721,9 +2716,9 @@ instead. `perspective.plane.matchObject` (Object › Perspective › Move Plane 
 selected object onto it.
 
 ```json
-{"name":"run_command","arguments":{"command":"perspective.plane.move","params":{"plane":"right","offset":40,"objects":"move"}}}
-{"name":"run_command","arguments":{"command":"perspective.plane.matchObject","params":{}}}
-{"name":"run_command","arguments":{"command":"ui.perspectivePlane","params":{"plane":"ground"}}}
+{"name":"command_run","arguments":{"id":"perspective.plane.move","params":{"plane":"right","offset":40,"objects":"move"}}}
+{"name":"command_run","arguments":{"id":"perspective.plane.matchObject","params":{}}}
+{"name":"command_run","arguments":{"id":"ui.perspectivePlane","params":{"plane":"ground"}}}
 ```
 
 Type and symbol instances attached to a plane stay type and symbol instances: their `perspective` record keeps a
@@ -2735,10 +2730,10 @@ Perspective keeps their look. Shape, spiral, polar grid and flare drags draw on 
 shows, and so do the click-to-size dialogs (`perspective.draw` with `at`: the click; sizes are plane units).
 
 ```json
-{"name":"run_command","arguments":{"command":"perspective.editText","params":{}}}
-{"name":"run_command","arguments":{"command":"text.setText","params":{"text":"OPEN"}}}
-{"name":"run_command","arguments":{"command":"object.exitIsolation","params":{}}}
-{"name":"run_command","arguments":{"command":"perspective.draw","params":{"command":"shape.rectangle","params":{"x":470,"y":300,"width":50,"height":30},"at":[470,300]}}}
+{"name":"command_run","arguments":{"id":"perspective.editText","params":{}}}
+{"name":"command_run","arguments":{"id":"text.setText","params":{"text":"OPEN"}}}
+{"name":"command_run","arguments":{"id":"object.exitIsolation","params":{}}}
+{"name":"command_run","arguments":{"id":"perspective.draw","params":{"command":"shape.rectangle","params":{"x":470,"y":300,"width":50,"height":30},"at":[470,300]}}}
 ```
 
 ## Blends
@@ -2750,9 +2745,9 @@ from (as the Blend tool's clicks on anchor points do; an open path's last anchor
 among the objects takes the others in as more key objects, keeping its options, name and transparency:
 
 ```json
-{"name":"run_command","arguments":{"command":"object.blend.make","params":{"ids":[12,15],"starts":[0,2],"steps":8}}}
-{"name":"run_command","arguments":{"command":"object.blend.make","params":{"ids":[20,31]}}}
-{"name":"run_command","arguments":{"command":"object.blend.info","params":{}}}
+{"name":"command_run","arguments":{"id":"object.blend.make","params":{"ids":[12,15],"starts":[0,2],"steps":8}}}
+{"name":"command_run","arguments":{"id":"object.blend.make","params":{"ids":[20,31]}}}
+{"name":"command_run","arguments":{"id":"object.blend.info","params":{}}}
 ```
 
 A blend's spine is the straight lines between its key centres until it is edited. `object.blend.info` lists it
@@ -2763,8 +2758,8 @@ sits on; the first edit turns the spine into a path. Moving a key moves its end 
 (`object.blend.release`) leaves the spine as a path that paints nothing (`spines` in the result):
 
 ```json
-{"name":"run_command","arguments":{"command":"object.blend.spine.addAnchor","params":{"id":40,"x":150,"y":100}}}
-{"name":"run_command","arguments":{"command":"object.blend.spine.moveAnchor","params":{"id":40,"anchor":1,"x":150,"y":20}}}
+{"name":"command_run","arguments":{"id":"object.blend.spine.addAnchor","params":{"id":40,"x":150,"y":100}}}
+{"name":"command_run","arguments":{"id":"object.blend.spine.moveAnchor","params":{"id":40,"anchor":1,"x":150,"y":20}}}
 ```
 
 How blends interpolate: closed shapes start where they twist least unless `starts` picks the anchors; strokes
@@ -2789,7 +2784,7 @@ Single-line fills each line as far as it goes. Point type and type on a path hav
 give the same result there; paragraphs that mix type sizes fall back to Single-line.
 
 ```json
-{"name":"run_command","arguments":{"command":"text.setFormat","params":{"ids":[7],"composer":"singleLine"}}}
+{"name":"command_run","arguments":{"id":"text.setFormat","params":{"ids":[7],"composer":"singleLine"}}}
 ```
 
 ## Editing envelopes
@@ -2807,6 +2802,6 @@ style, orientation, bend and distortions (or the mesh's rows and columns), Reset
 Envelope Options.
 
 ```json
-{"name":"run_command","arguments":{"command":"object.envelope.editContents","params":{"editing":true}}}
-{"name":"run_command","arguments":{"command":"object.mesh.movePoint","params":{"id":12,"index":4,"x":220,"y":140,"handle":0}}}
+{"name":"command_run","arguments":{"id":"object.envelope.editContents","params":{"editing":true}}}
+{"name":"command_run","arguments":{"id":"object.mesh.movePoint","params":{"id":12,"index":4,"x":220,"y":140,"handle":0}}}
 ```

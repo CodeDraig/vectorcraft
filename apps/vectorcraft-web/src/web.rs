@@ -1,6 +1,11 @@
 //! The browser shell: web `Services`, drag-and-drop, pasted pictures and files, the eframe web
 //! runner, and starting again with new graphics when the page loses them (#369).
 
+mod storage;
+use storage::{BrowserStore, RECOVERY_PREFIX};
+mod delivery;
+use delivery::{BrowserPrint, download};
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -440,136 +445,6 @@ fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Op
     }
 }
 
-/// Data Recovery's store on the web: the browser's local storage (kept across visits and shared by
-/// the site's tabs), each entry as base64 under [`RECOVERY_PREFIX`]`<area>/<name>`. It has no
-/// locks: each tab holds its area with a heartbeat, judged by the browser's clock, and with a Web
-/// Lock named after it where the browser has them (`locks`), which a tab whose timers are paused
-/// in the background keeps.
-struct BrowserStore {
-    locks: Option<WebLocks>,
-}
-
-const RECOVERY_PREFIX: &str = "vectorcraft-recovery/";
-
 fn js_err(e: wasm_bindgen::JsValue) -> String {
     format!("{e:?}")
-}
-
-fn local_storage() -> Result<web_sys::Storage, String> {
-    web_sys::window().ok_or("no window")?.local_storage().map_err(js_err)?.ok_or_else(|| "browser storage is turned off".into())
-}
-
-impl RecoveryStore for BrowserStore {
-    fn list(&self) -> Result<Vec<String>, String> {
-        let s = local_storage()?;
-        let n = s.length().map_err(js_err)?;
-        Ok((0..n).filter_map(|i| s.key(i).ok().flatten()).filter_map(|k| k.strip_prefix(RECOVERY_PREFIX).map(str::to_string)).collect())
-    }
-    fn read(&self, name: &str) -> Result<Vec<u8>, String> {
-        let text = local_storage()?.get_item(&format!("{RECOVERY_PREFIX}{name}")).map_err(js_err)?;
-        text.and_then(|t| vectorcraft_format::base64_decode(&t)).ok_or_else(|| format!("{name}: no such recovery entry"))
-    }
-    fn write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
-        local_storage()?
-            .set_item(&format!("{RECOVERY_PREFIX}{name}"), &vectorcraft_format::base64_encode(bytes))
-            .map_err(|e| format!("browser storage is full or turned off: {}", js_err(e)))
-    }
-    fn remove(&self, name: &str) -> Result<(), String> {
-        local_storage()?.remove_item(&format!("{RECOVERY_PREFIX}{name}")).map_err(js_err)
-    }
-    fn location(&self) -> String {
-        "browser storage".into()
-    }
-    fn now(&self) -> Option<i64> {
-        Some((js_sys::Date::now() / 1000.0) as i64)
-    }
-    fn announce(&self, area: &str) -> Option<Hold> {
-        self.locks.as_ref()?.hold(area)
-    }
-    fn announced(&self, area: &str) -> Option<bool> {
-        self.locks.as_ref().map(|l| l.held(area))
-    }
-}
-
-/// Trigger a browser download of `bytes` named after the last component of `path`.
-fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
-    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "vectorcraft".into());
-    let window = web_sys::window().ok_or("no window")?;
-    let document = window.document().ok_or("no document")?;
-    let url = blob_url(bytes, fileio::format_for_name(&name).map_or("application/octet-stream", |f| f.mime))?;
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").map_err(js)?.dyn_into().map_err(|_| "not an anchor")?;
-    a.set_href(&url);
-    a.set_download(&name);
-    a.style().set_property("display", "none").map_err(js)?;
-    let body = document.body().ok_or("no body")?;
-    body.append_child(&a).map_err(js)?;
-    a.click();
-    a.remove();
-    // Revoke after the click has been dispatched; the download keeps its own reference.
-    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
-        web_sys::Url::revoke_object_url(&url).ok();
-    });
-    window.set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 10_000).map_err(js)?;
-    Ok(())
-}
-
-/// An object URL of a blob of `bytes` with media type `mime` (revoke it when done).
-fn blob_url(bytes: &[u8], mime: &str) -> Result<String, String> {
-    let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type(mime);
-    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(js_err)?;
-    web_sys::Url::create_object_url_with_blob(&blob).map_err(js_err)
-}
-
-/// File → Print in the browser: the job's PDF in a hidden frame, printed through the browser's
-/// print dialog (which picks the printer).
-struct BrowserPrint;
-
-/// The frame holding the last print job (the next job replaces it).
-const PRINT_FRAME_ID: &str = "vectorcraft-print-frame";
-
-impl PrintService for BrowserPrint {
-    fn printers(&mut self) -> Vec<Printer> {
-        // Browsers don't tell pages about printers: their print dialog lists them.
-        vec![]
-    }
-
-    fn print(&mut self, job: &PrintJob) -> Result<String, String> {
-        print_pdf(job.pdf)?;
-        Ok(format!("Printing “{}”: pick the printer in the browser's print dialog", job.title))
-    }
-}
-
-fn print_pdf(pdf: &[u8]) -> Result<(), String> {
-    let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
-    // The previous job's frame and its blob go first.
-    if let Some(old) = document.get_element_by_id(PRINT_FRAME_ID) {
-        if let Some(url) = old.get_attribute("src") {
-            web_sys::Url::revoke_object_url(&url).ok();
-        }
-        old.remove();
-    }
-    let url = blob_url(pdf, "application/pdf")?;
-    let frame: web_sys::HtmlIFrameElement = document.create_element("iframe").map_err(js_err)?.dyn_into().map_err(|_| "not a frame")?;
-    frame.set_id(PRINT_FRAME_ID);
-    // Out of sight but laid out: browsers don't print a frame that isn't.
-    let style = frame.style();
-    for (k, v) in [("position", "fixed"), ("right", "0"), ("bottom", "0"), ("width", "0"), ("height", "0"), ("border", "0")] {
-        style.set_property(k, v).map_err(js_err)?;
-    }
-    let loaded = frame.clone();
-    let onload = wasm_bindgen::closure::Closure::once_into_js(move || {
-        if let Some(w) = loaded.content_window() {
-            w.focus().ok();
-            if let Err(e) = w.print() {
-                log::error!("printing failed: {e:?}");
-            }
-        }
-    });
-    frame.set_onload(Some(onload.unchecked_ref()));
-    frame.set_src(&url);
-    document.body().ok_or("no body")?.append_child(&frame).map_err(js_err)?;
-    Ok(())
 }

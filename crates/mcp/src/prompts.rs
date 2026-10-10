@@ -163,7 +163,7 @@ Palette: {palette}
 Wording: {text}
 
 Coordinates are points in document space: y points down and the origin is the first
-artboard's top-left. Work in the document that is already open (inspect_document); only
+artboard's top-left. Work in the document that is already open (doc_inspect); only
 run file.new when the brief asks for a different artboard size.
 
 Method:
@@ -254,7 +254,7 @@ Return the ids of the icons in a grid, and leave them as separate objects on one
 Recolour the current selection in VectorCraft with {palette}, using the `{method}` recolour method.
 
 Method:
-1. inspect_document to see what is selected and what colours it actually uses.
+1. doc_inspect to see what is selected and what colours it actually uses.
 2. If you do not know the colours, run recolor.colors first: it groups similar colours into
    rows (k-means in Lab, weighted by use) and hands back the map. Then edit the `to` colour of
    each row and apply it. That is the reliable route for artwork you did not draw.

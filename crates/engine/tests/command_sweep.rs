@@ -294,7 +294,7 @@ fn structured_junk() {
         ("text.tabs.get", json!({"start": -5})),
         ("paraStyle.apply", json!({"name": "[Normal Paragraph Style]", "id": 2, "start": u64::MAX, "end": 1})),
         ("paraStyle.new", json!({"id": 2, "start": u64::MAX})),
-        ("document.setUnits", json!({"units": "Parsecs"})),
+        ("document.setup", json!({"units": "Parsecs"})),
         ("document.open", json!({"name": "x.svg", "dataBase64": "!!!"})),
         ("document.open", json!({"name": "x.svg", "dataBase64": "PHN2Zz4="})),
         ("document.open", json!({"name": "x.pdf", "dataBase64": "JVBERi0xLjQK"})),

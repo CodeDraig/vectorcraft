@@ -1,12 +1,12 @@
 //! Linked images over MCP, headless: a document opened without its linked file reports it, and
-//! `links.relink` / `links.check` reach it through `run_command`.
+//! `links.relink` / `links.check` reach it through `command_run`.
 
 use serde_json::{Value, json};
 
 use crate::{Headless, call_tool};
 
 fn run(h: &mut Headless, command: &str, params: Value) -> Value {
-    let r = call_tool(h, "run_command", &json!({"command": command, "params": params}));
+    let r = call_tool(h, "command_run", &json!({"id": command, "params": params}));
     assert!(!r.is_error, "{command}: {r:?}");
     serde_json::from_str(r.content[0]["text"].as_str().unwrap()).unwrap()
 }

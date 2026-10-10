@@ -12,7 +12,7 @@ fn text(r: &crate::ToolResult) -> Value {
 }
 
 fn run(h: &mut Headless, command: &str, params: Value) -> Value {
-    text(&call_tool(h, "run_command", &json!({"command": command, "params": params})))
+    text(&call_tool(h, "command_run", &json!({"id": command, "params": params})))
 }
 
 #[test]

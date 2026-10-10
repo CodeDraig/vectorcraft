@@ -31,7 +31,7 @@ fn gradient_annotator_end_to_end() {
     let mut h = Headless::new();
     h.call("engine.execute", json!({"command": "file.new", "params": {"width": 300, "height": 300}})).unwrap();
     ok(&mut h, "draw_shape", json!({"shape": "rectangle", "x": 100, "y": 100, "width": 100, "height": 100}));
-    ok(&mut h, "run_command", json!({"command": "paint.setFill", "params": {"gradient": {"start": [100, 150], "end": [200, 150]}}}));
+    ok(&mut h, "command_run", json!({"id": "paint.setFill", "params": {"gradient": {"start": [100, 150], "end": [200, 150]}}}));
     // A click on the bar adds a stop at 30 %.
     let click = json!({"tool": "gradient", "events": [{"kind": "down", "x": 130, "y": 150}, {"kind": "up", "x": 130, "y": 150}]});
     ok(&mut h, "pointer_gesture", click);

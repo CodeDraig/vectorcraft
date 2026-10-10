@@ -1,7 +1,7 @@
 //! Programmatic control of the running app (agents, tests, MCP).
 //!
 //! Methods (JSON-lines over the host's transport):
-//! - `engine.execute {command, params}` / `ui.menu.invoke {command|id, params}`: run any command
+//! - `engine.execute {command, params}` / `ui.menu.invoke {command, params}`: run any command
 //! - `engine.commands`: engine + UI commands with enablement
 //! - `document.inspect`: document summary; `ui.inspect`: UI state
 //! - `ui.menu.list`: flattened menu tree
@@ -127,8 +127,8 @@ pub fn handle(app: &mut VectorcraftApp, ctx: &egui::Context, req: &ControlReques
     let p = &req.params;
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     match req.method.as_str() {
-        "engine.execute" | "ui.menu.invoke" | "command" => {
-            let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
+        "engine.execute" | "ui.menu.invoke" => {
+            let Some(id) = s("command") else { return err("missing `command`") };
             let params = p.get("params").cloned().unwrap_or(json!({}));
             let params = if params.is_null() { json!({}) } else { params };
             wrap(app.run(id, params))

@@ -51,7 +51,7 @@ fn document_mode_converts_through_cms() {
     let _g = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut s = session();
     let a = rect(&mut s, 0.0, 0.0, 10.0, 10.0, json!("#ff0000"));
-    let r = s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk"})).unwrap();
+    let r = s.execute("file.documentColorMode", &json!({"mode": "cmyk"})).unwrap();
     assert!(r["changed"].as_u64().unwrap() >= 1);
     assert_eq!(s.doc().unwrap().doc.color_mode, ColorMode::Cmyk);
     let Paint::Solid { color: Color::Cmyk { c, m, y, k }, .. } = fill_of(&s, a) else { panic!("{:?}", fill_of(&s, a)) };
@@ -62,7 +62,7 @@ fn document_mode_converts_through_cms() {
     s.execute("edit.undo", &json!({})).unwrap();
     assert_eq!(s.doc().unwrap().doc.color_mode, ColorMode::Rgb);
     assert_eq!(fill_of(&s, a), Paint::solid(Color::rgb(1.0, 0.0, 0.0)));
-    assert!(s.execute("object.convertDocumentColorMode", &json!({"mode": "lab"})).is_err());
+    assert!(s.execute("file.documentColorMode", &json!({"mode": "lab"})).is_err());
 }
 
 #[test]
@@ -71,14 +71,14 @@ fn document_mode_conversion_is_idempotent() {
     let mut s = session();
     rect(&mut s, 0.0, 0.0, 10.0, 10.0, json!("#336699"));
     rect(&mut s, 20.0, 0.0, 10.0, 10.0, json!({"gray": 40}));
-    s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk"})).unwrap();
+    s.execute("file.documentColorMode", &json!({"mode": "cmyk"})).unwrap();
     let once = s.doc().unwrap().doc.clone();
-    let r = s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk"})).unwrap();
+    let r = s.execute("file.documentColorMode", &json!({"mode": "cmyk"})).unwrap();
     assert_eq!(r["changed"], 0);
     assert_eq!(*s.doc().unwrap().doc, *once);
-    s.execute("object.convertDocumentColorMode", &json!({"mode": "rgb"})).unwrap();
+    s.execute("file.documentColorMode", &json!({"mode": "rgb"})).unwrap();
     let twice = s.doc().unwrap().doc.clone();
-    assert_eq!(s.execute("object.convertDocumentColorMode", &json!({"mode": "rgb"})).unwrap()["changed"], 0);
+    assert_eq!(s.execute("file.documentColorMode", &json!({"mode": "rgb"})).unwrap()["changed"], 0);
     assert_eq!(*s.doc().unwrap().doc, *twice);
 }
 
@@ -88,8 +88,8 @@ fn rgb_cmyk_rgb_document_roundtrip_within_tolerance() {
     let mut s = session();
     let cols = ["#cc9980", "#808080", "#4d7359", "#e6d94d"];
     let ids: Vec<NodeId> = cols.iter().enumerate().map(|(i, h)| rect(&mut s, i as f64 * 20.0, 0.0, 10.0, 10.0, json!(h))).collect();
-    s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk", "intent": "relative"})).unwrap();
-    s.execute("object.convertDocumentColorMode", &json!({"mode": "rgb"})).unwrap();
+    s.execute("file.documentColorMode", &json!({"mode": "cmyk", "intent": "relative"})).unwrap();
+    s.execute("file.documentColorMode", &json!({"mode": "rgb"})).unwrap();
     for (id, h) in ids.iter().zip(cols) {
         let orig = Color::from_hex(h).unwrap().to_rgb();
         let back = fill_of(&s, *id).color().unwrap().to_rgb();
@@ -106,7 +106,7 @@ fn swatch_links_survive_mode_conversion() {
     s.execute("swatch.new", &json!({"name": "Brand", "color": "#2a6fb0", "global": true})).unwrap();
     let a = NodeId(s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap()["id"].as_u64().unwrap());
     s.execute("paint.setFill", &json!({"ids": [a.0], "swatch": "Brand"})).unwrap();
-    s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk"})).unwrap();
+    s.execute("file.documentColorMode", &json!({"mode": "cmyk"})).unwrap();
     let Paint::Solid { color, swatch, .. } = fill_of(&s, a) else { panic!() };
     assert_eq!(swatch.as_deref(), Some("Brand"));
     let sw = s.doc().unwrap().doc.swatches.iter().find(|w| w.name == "Brand").unwrap().paint.color().unwrap();
@@ -330,7 +330,7 @@ fn pdf_cmyk_document_writes_device_cmyk() {
     rect(&mut s, 0.0, 0.0, 10.0, 10.0, json!("#ff0000"));
     let rgb_pdf = pdf_text(&s.doc().unwrap().doc);
     assert!(!has_cmyk_op(&rgb_pdf) && rgb_pdf.contains(" rg"));
-    s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk"})).unwrap();
+    s.execute("file.documentColorMode", &json!({"mode": "cmyk"})).unwrap();
     let pdf = pdf_text(&s.doc().unwrap().doc);
     assert!(has_cmyk_op(&pdf), "CMYK colours are written with the DeviceCMYK `k` operator");
     // RGB colours pasted into a CMYK document are separated on export.
@@ -362,8 +362,8 @@ fn intents_reach_the_document_conversion() {
     rect(&mut a, 0.0, 0.0, 10.0, 10.0, json!("#00ff00"));
     let mut b = session();
     rect(&mut b, 0.0, 0.0, 10.0, 10.0, json!("#00ff00"));
-    a.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk", "intent": "perceptual"})).unwrap();
-    b.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk", "intent": "relative"})).unwrap();
+    a.execute("file.documentColorMode", &json!({"mode": "cmyk", "intent": "perceptual"})).unwrap();
+    b.execute("file.documentColorMode", &json!({"mode": "cmyk", "intent": "relative"})).unwrap();
     let first = |s: &Session| {
         let mut out = None;
         s.doc().unwrap().doc.walk(|n| {

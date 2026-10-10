@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use vectorcraft_doc::{Document, Node, NodeId, Unit};
+use vectorcraft_doc::{Document, Node, NodeId};
 use vectorcraft_geom::{Affine, Vec2};
 
 use super::clipboard::SwatchChoices;
@@ -28,15 +28,6 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "document.node", "Inspect Object", [], None, "{id, summary?: compact summary, depth?: child levels in the summary (default all), childLimit?: children shown per node (default all; a level that shows fewer reports childCount)} → one object", has_doc, doc_node),
         cmd!(query "document.find", "Find Objects", [], None, "{name?: substring of the Layers panel name, kind?: panel label such as Group, Path, Type or Image (exact), text?: substring of type content, limit?: max matches (default 100, 0 counts only)} → {matches: [{id, name, kind, path}], total}", has_doc, doc_find),
         cmd!(query "document.json", "Document JSON", [], None, "{} → complete document model", has_doc, |s, _| Ok(serde_json::to_value(&*s.doc()?.doc).unwrap_or(Value::Null))),
-        cmd!(
-            "document.setUnits",
-            "Units",
-            ["File", "Document Setup"],
-            None,
-            "{units: \"Points\"|\"Picas\"|\"Inches\"|\"Millimeters\"|\"Centimeters\"|\"Pixels\"|\"Feet & Inches\"|\"Meters\"|\"Yards\"|\"Feet\"} the document's units: every length the UI shows and reads (General)",
-            has_doc,
-            set_units
-        ),
         cmd!("edit.undo", "Undo", ["Edit"], Some("Cmd+Z"), "{}", can_undo, undo),
         cmd!("edit.redo", "Redo", ["Edit"], Some("Cmd+Shift+Z"), "{}", can_redo, redo),
         cmd!("edit.cut", "Cut", ["Edit"], Some("Cmd+X"), "{} (the Artboard tool chosen: artboard.cut)", has_selection_or_artboard_tool, cut),
@@ -153,13 +144,6 @@ fn doc_find(s: &mut Session, p: &Value) -> Result<Value> {
     let limit = opt_u64(p, "document.find", "limit")?.unwrap_or(100);
     let (matches, total) = inspect::find_nodes(&s.doc()?.doc, &filter, limit);
     Ok(json!({"matches": matches, "total": total}))
-}
-
-/// Document Setup's units (also `document.setup {units}`).
-fn set_units(s: &mut Session, p: &Value) -> Result<Value> {
-    let u = str_param(p, "units").and_then(Unit::named).ok_or_else(|| bad("document.setUnits", "unknown units"))?;
-    s.set_document_units(u)?;
-    ok()
 }
 
 /// A typing session in progress (the Type tool previews the whole session as one interaction).

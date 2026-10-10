@@ -34,7 +34,7 @@ fn grouped_swatch(s: &mut Session, group: &str, name: &str, color: Color) {
 fn document_color_mode_converts_grouped_swatches() {
     let mut s = session();
     grouped_swatch(&mut s, "Grays", "Ink", Color::rgb(0.2, 0.4, 0.6));
-    run(&mut s, "object.convertDocumentColorMode", json!({"mode": "cmyk"}));
+    run(&mut s, "file.documentColorMode", json!({"mode": "cmyk"}));
     for g in &doc(&s).swatch_groups {
         for sw in &g.swatches {
             assert!(!matches!(sw.paint.color(), Some(Color::Rgb { .. })), "{} in {} is still RGB", sw.name, g.name);

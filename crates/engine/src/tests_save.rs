@@ -305,14 +305,13 @@ fn save_plans_suggest_names_and_folders() {
 }
 
 #[test]
-fn document_color_mode_is_one_command_with_a_hidden_alias() {
+fn document_color_mode_has_one_current_command() {
     let mut s = session();
     let ids: Vec<&str> = s.commands().iter().filter(|c| c.menu.first() == Some(&"File") && c.label.contains("Color Mode")).map(|c| c.id).collect();
     assert_eq!(ids, ["file.documentColorMode"], "one File menu entry");
-    assert!(crate::cmd::is_alias("object.convertDocumentColorMode") && !crate::cmd::is_alias("file.documentColorMode"));
-    // Both ids run the same conversion; `convert: false` only switches the mode.
+    // `convert: false` only switches the mode.
     rect(&mut s);
-    assert!(s.execute("object.convertDocumentColorMode", &json!({"mode": "cmyk"})).unwrap()["changed"].as_u64().unwrap() >= 1);
+    assert!(s.execute("file.documentColorMode", &json!({"mode": "cmyk"})).unwrap()["changed"].as_u64().unwrap() >= 1);
     let before = s.doc().unwrap().doc.clone();
     let r = s.execute("file.documentColorMode", &json!({"mode": "rgb", "convert": false})).unwrap();
     assert_eq!(r["changed"], 0);
@@ -329,9 +328,7 @@ fn choosing_the_current_color_mode_is_not_an_edit() {
     let st = s.doc_mut().unwrap();
     st.mark_saved();
     let undo = st.history.undo.len();
-    for id in ["file.documentColorMode", "object.convertDocumentColorMode"] {
-        assert_eq!(s.execute(id, &json!({"mode": "rgb"})).unwrap()["changed"], 0);
-    }
+    assert_eq!(s.execute("file.documentColorMode", &json!({"mode": "rgb"})).unwrap()["changed"], 0);
     let st = s.doc().unwrap();
     assert!(!st.is_dirty(), "the document stays saved");
     assert_eq!(st.history.undo.len(), undo, "no empty undo step");
@@ -367,4 +364,13 @@ fn a_template_places_like_a_native_file() {
     s.execute("file.place", &json!({"name": "card.vctemplate", "dataBase64": tpl["dataBase64"]})).unwrap();
     let st = s.doc().unwrap();
     assert!(st.doc.node_count() > empty && !st.selection.is_empty(), "the template's art is placed and selected");
+}
+
+#[test]
+fn removed_command_aliases_are_unknown() {
+    let mut s = session();
+    for id in ["object.convertDocumentColorMode", "document.setUnits"] {
+        assert!(crate::find_command(id).is_none());
+        assert!(matches!(s.execute(id, &json!({})), Err(crate::EngineError::UnknownCommand(_))));
+    }
 }

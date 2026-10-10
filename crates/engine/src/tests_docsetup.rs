@@ -122,12 +122,12 @@ fn bad_values_are_rejected_and_change_nothing() {
 }
 
 #[test]
-fn set_units_is_an_alias() {
+fn document_setup_units_round_trip_and_validation() {
     let mut s = session();
-    s.execute("document.setUnits", &json!({"units": "inches"})).unwrap();
+    s.execute("document.setup", &json!({"units": "inches"})).unwrap();
     assert_eq!(s.doc().unwrap().doc.units, Unit::Inches);
     assert_eq!(s.execute("document.setup", &json!({})).unwrap()["units"], "Inches");
-    assert!(s.execute("document.setUnits", &json!({"units": "parsecs"})).is_err());
+    assert!(s.execute("document.setup", &json!({"units": "parsecs"})).is_err());
 }
 
 #[test]

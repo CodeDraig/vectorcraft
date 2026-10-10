@@ -111,7 +111,7 @@ fn right_click_on_empty_canvas_offers_the_view_and_a_dismissing_click_does_nothi
 }
 
 /// #528: right-clicking a ruler offers the document units, the current one checked, and choosing one
-/// swaps them — the same effect as Preferences ▸ Units ▸ General (`document.setUnits`).
+/// swaps them — the same effect as Preferences ▸ Units ▸ General (`document.setup`).
 #[test]
 fn right_clicking_a_ruler_swaps_the_document_units() {
     use vectorcraft_doc::Unit;
@@ -126,7 +126,7 @@ fn right_clicking_a_ruler_swaps_the_document_units() {
         assert!(has(&texts, label), "{label} in {texts:?}");
     }
     assert!(texts.iter().any(|(t, _)| t == "✓  Points"), "the current unit is checked: {texts:?}");
-    // Choosing a unit runs document.setUnits and closes the menu.
+    // Choosing a unit runs document.setup and closes the menu.
     let mm = texts.iter().find(|(t, _)| t.trim_start_matches(['✓', ' ']) == "Millimeters").map(|(_, r)| r.center()).expect("Millimeters");
     let texts = click(&mut app, &ctx, mm, PointerButton::Primary);
     assert_eq!(app.session.general_unit(), Unit::Millimeters, "the ruler's unit changed");

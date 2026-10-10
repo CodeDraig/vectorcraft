@@ -26,7 +26,7 @@ fn tiff_options_pick_the_model_byte_order_and_compression() {
     assert!(app.ui.dialog.is_none());
 
     // A CMYK document exports CMYK by default.
-    app.run("object.convertDocumentColorMode", json!({"mode": "cmyk"})).unwrap();
+    app.run("file.documentColorMode", json!({"mode": "cmyk"})).unwrap();
     app.run("file.exportAs", json!({"format": "tiff"})).unwrap();
     confirm(&mut app).unwrap();
     assert_eq!(app.ui.dialog.as_ref().unwrap().str("colorModel"), "cmyk");

@@ -19,10 +19,6 @@ use vectorcraft_render::proof;
 
 use super::*;
 
-/// `Document.unknown` key under which files before format v3 kept the assigned profiles (migrated
-/// to `Document::color_profiles` on load).
-pub const PROFILES_KEY: &str = vectorcraft_doc::profiles::LEGACY_PROFILES_KEY;
-
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -51,15 +47,6 @@ pub fn specs() -> Vec<CommandSpec> {
             "{rgb?: profile|null, cmyk?: profile|null} tag the document with profiles (colour numbers are kept) → {rgb, cmyk}",
             has_doc,
             assign_profile
-        ),
-        cmd!(
-            "object.convertDocumentColorMode",
-            "Convert Document Color Mode",
-            [],
-            None,
-            "same as file.documentColorMode: {mode: \"cmyk\"|\"rgb\", convert?: true, intent?, grays?} → {changed} (an alias kept for older scripts; the command palette leaves it out)",
-            has_doc,
-            convert_mode
         ),
         cmd!(
             query "color.convert",
@@ -256,8 +243,8 @@ impl Grays {
     }
 }
 
-/// File → Document Color Mode (`file.documentColorMode` and its alias
-/// `object.convertDocumentColorMode`): set the mode and, unless `convert: false`, convert every
+/// File → Document Color Mode (`file.documentColorMode`): set the mode and, unless
+/// `convert: false`, convert every
 /// colour through the colour settings.
 pub(crate) fn convert_mode(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "file.documentColorMode";

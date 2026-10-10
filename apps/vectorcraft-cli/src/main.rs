@@ -35,6 +35,14 @@ macro_rules! out {
         }
     }};
 }
+mod mcp;
+use mcp::mcp;
+mod batch;
+use batch::run;
+mod bench;
+use bench::bench;
+mod files;
+use files::{convert, info};
 
 /// The desktop app's CoreText font lister, shared: exports and MCP find the same fonts.
 #[cfg(target_os = "macos")]
@@ -138,190 +146,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn mcp(args: &[String]) -> Result<(), String> {
-    let mut connect: Option<String> = None;
-    let mut headless = false;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--connect" => connect = Some(it.next().cloned().ok_or("--connect needs an address")?),
-            "--headless" => headless = true,
-            other => return Err(format!("unknown mcp option `{other}`")),
-        }
-    }
-    if headless && connect.is_some() {
-        return Err("use either --connect or --headless".into());
-    }
-    let backend: Box<dyn Backend> = if headless {
-        Box::new(Headless::with_document())
-    } else if let Some(addr) = connect {
-        // Explicit address: fail loudly if the app isn't there.
-        Box::new(Remote::connect(&addr).map_err(|e| format!("cannot connect to {addr}: {e}"))?)
-    } else {
-        match Remote::connect(DEFAULT_ADDR) {
-            Ok(r) => Box::new(r),
-            Err(_) => Box::new(Headless::with_document()),
-        }
-    };
-    eprintln!("vectorcraft-cli: MCP server on stdio ({})", backend.describe());
-    // The binary owns the logger, not the library: installing one here keeps an embedder that
-    // uses `vectorcraft_mcp` free to bring its own. Silent until a client sends logging/setLevel.
-    vectorcraft_mcp::logging::install();
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    Server::new(backend).serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
-}
-
 fn commands() -> Result<(), String> {
     let mut h = Headless::new();
     let v = h.call("engine.commands", json!({}))?;
     outln!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
-    Ok(())
-}
-
-fn convert(args: &[String]) -> Result<(), String> {
-    let mut files = vec![];
-    let (mut scale, mut artboard, mut range, mut outline_text, mut replace_lossy) = (1.0f64, None::<u64>, None::<String>, false, false);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--scale" | "-s" => scale = it.next().and_then(|v| v.parse().ok()).ok_or("--scale needs a number")?,
-            "--artboard" | "-a" => artboard = Some(it.next().and_then(|v| v.parse().ok()).ok_or("--artboard needs an index")?),
-            "--range" | "-r" => range = Some(it.next().cloned().ok_or("--range needs artboards such as 1-3,5")?),
-            "--outline-text" => outline_text = true,
-            "--replace-lossy" => replace_lossy = true,
-            f => files.push(f.to_string()),
-        }
-    }
-    let [input, output] = <[String; 2]>::try_from(files).map_err(|_| "convert needs IN and OUT")?;
-    let mut h = Headless::new();
-    h.call("app.open", json!({"path": input})).map_err(|e| format!("open {input}: {e}"))?;
-    // A conversion keeps hidden layers and objects, written hidden, where the format can (SVG,
-    // PSD).
-    let params = json!({"path": output, "scale": scale, "artboard": artboard, "range": range, "outlineText": outline_text, "hiddenLayers": true, "acknowledgeLoss": replace_lossy});
-    let r = h.call("engine.execute", json!({"command": "document.export", "params": params})).map_err(|e| format!("export {output}: {e}"))?;
-    outln!("{r}");
-    Ok(())
-}
-
-fn info(args: &[String]) -> Result<(), String> {
-    let file = args.first().ok_or("info needs a FILE")?;
-    let mut h = Headless::new();
-    let opened = h.call("app.open", json!({"path": file})).map_err(|e| format!("open {file}: {e}"))?;
-    let base = h.call("engine.execute", json!({"command": "file.info", "params": {}}))?;
-    let doc = h.session.doc().map_err(|e| e.to_string())?.doc.clone();
-    let mut kinds: std::collections::BTreeMap<&'static str, usize> = Default::default();
-    doc.walk(|n| *kinds.entry(n.kind_label()).or_default() += 1);
-    let fonts = h.call("engine.execute", json!({"command": "text.fonts", "params": {}})).unwrap_or(Value::Null);
-    let artboards: Vec<Value> =
-        doc.artboards.iter().map(|a| json!({"name": a.name, "rect": [a.rect.x0, a.rect.y0, a.rect.width(), a.rect.height()]})).collect();
-    // What didn't come in as it was (an EPS read from its preview says why).
-    let v = json!({"file": file, "warnings": opened["warnings"], "info": base, "artboards": artboards, "kinds": kinds, "fonts": fonts});
-    outln!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
-    Ok(())
-}
-
-enum Step {
-    Cmd(String, Value),
-    Export(String),
-}
-
-fn run(args: &[String]) -> Result<(), String> {
-    let mut input: Option<String> = None;
-    let mut steps: Vec<Step> = vec![];
-    let mut scale = 1.0;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        let mut val = |what: &str| it.next().cloned().ok_or_else(|| format!("{a} needs {what}"));
-        match a.as_str() {
-            "--in" | "-i" => input = Some(val("a file")?),
-            "--cmd" | "-c" => steps.push(Step::Cmd(val("a command id")?, json!({}))),
-            "--params" | "-p" => {
-                let raw = val("JSON")?;
-                let p: Value = serde_json::from_str(&raw).map_err(|e| format!("--params {raw}: {e}"))?;
-                if !p.is_object() {
-                    return Err(format!("--params must be a JSON object, got {raw}"));
-                }
-                match steps.last_mut() {
-                    Some(Step::Cmd(_, params)) => *params = p,
-                    _ => return Err("--params must follow a --cmd".into()),
-                }
-            }
-            "--export" | "-o" => steps.push(Step::Export(val("a file")?)),
-            "--scale" | "-s" => {
-                let raw = val("a number")?;
-                scale = raw.parse::<f64>().map_err(|_| format!("--scale {raw}: not a number"))?;
-            }
-            other => return Err(format!("unknown run option `{other}`")),
-        }
-    }
-
-    let mut h = Headless::new();
-    let mut out = std::io::stdout().lock();
-    let mut emit = |v: Value| writeln!(out, "{v}").map_err(|e| e.to_string());
-    if let Some(path) = &input {
-        let r = h.call("app.open", json!({"path": path})).map_err(|e| format!("open {path}: {e}"))?;
-        emit(json!({"step": "open", "path": path, "result": r}))?;
-    } else if !matches!(steps.first(), Some(Step::Cmd(id, _)) if id == "file.new") {
-        h.ensure_document();
-    }
-    for step in steps {
-        match step {
-            Step::Cmd(id, params) => {
-                let r = h.call("engine.execute", json!({"command": id, "params": params})).map_err(|e| format!("{id}: {e}"))?;
-                emit(json!({"step": "cmd", "command": id, "result": r}))?;
-            }
-            Step::Export(path) => {
-                let r = h.call("app.export", json!({"path": path, "scale": scale})).map_err(|e| format!("export {path}: {e}"))?;
-                emit(json!({"step": "export", "result": r}))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn bench(args: &[String]) -> Result<(), String> {
-    let mut file = None;
-    let (mut w, mut h, mut iters) = (2880u32, 1800u32, 5u32);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--size" => {
-                let v = it.next().ok_or("--size needs WxH")?;
-                let (a, b) = v.split_once('x').ok_or("--size needs WxH")?;
-                w = a.parse().map_err(|_| "bad width")?;
-                h = b.parse().map_err(|_| "bad height")?;
-            }
-            "--iters" => iters = it.next().and_then(|v| v.parse().ok()).ok_or("--iters needs a number")?,
-            f if file.is_none() => file = Some(f.to_string()),
-            other => return Err(format!("unknown bench option `{other}`")),
-        }
-    }
-    let file = file.ok_or("bench needs a FILE")?;
-    let mut hl = Headless::new();
-    hl.call("app.open", json!({ "path": file })).map_err(|e| format!("open {file}: {e}"))?;
-    let doc = hl.session.doc().map_err(|e| e.to_string())?.doc.clone();
-    let b = doc.artboards.first().map(|a| a.rect).ok_or("document has no artboard")?;
-    let z = (w as f64 / b.width()).min(h as f64 / b.height()) * 0.95;
-    let view = vectorcraft_geom::Affine::translate((w as f64 / 2.0, h as f64 / 2.0))
-        * vectorcraft_geom::Affine::scale(z)
-        * vectorcraft_geom::Affine::translate(-b.center().to_vec2());
-    let opts = vectorcraft_render::RenderOptions::default();
-    outln!("{file}: {} nodes, {w}x{h}", doc.layers.iter().map(|l| l.count()).sum::<usize>());
-    for threads in [vectorcraft_render::default_threads(), 0] {
-        let mut r = vectorcraft_render::Renderer::new();
-        r.threads = threads;
-        r.render(&doc, w, h, view, &opts);
-        let t = std::time::Instant::now();
-        for _ in 0..iters {
-            r.render(&doc, w, h, view, &opts);
-        }
-        outln!(
-            "  threads {threads}: {:.1} ms/frame (drawn {}, culled {})",
-            t.elapsed().as_secs_f64() * 1000.0 / iters as f64,
-            r.stats.drawn,
-            r.stats.culled
-        );
-    }
     Ok(())
 }

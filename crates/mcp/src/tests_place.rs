@@ -1,4 +1,4 @@
-//! File → Place over MCP, headless: `file.place` through `run_command`, and the place cursor driven
+//! File → Place over MCP, headless: `file.place` through `command_run`, and the place cursor driven
 //! by pointer gestures and keys.
 
 use serde_json::{Value, json};
@@ -26,13 +26,9 @@ fn images(h: &Headless) -> usize {
 }
 
 #[test]
-fn headless_run_command_file_place() {
+fn headless_command_run_file_place() {
     let (mut h, png) = setup();
-    let r = text(&call_tool(
-        &mut h,
-        "run_command",
-        &json!({"command": "file.place", "params": {"name": "tile.png", "dataBase64": png, "at": [100, 50]}}),
-    ));
+    let r = text(&call_tool(&mut h, "command_run", &json!({"id": "file.place", "params": {"name": "tile.png", "dataBase64": png, "at": [100, 50]}})));
     assert_eq!((r["format"].as_str(), r["width"].as_f64(), r["height"].as_f64()), (Some("png"), Some(30.0), Some(20.0)), "{r}");
     assert_eq!(images(&h), 1);
     let sel = h.session.doc().unwrap().selection.objects.clone();
@@ -44,7 +40,7 @@ fn headless_run_command_file_place() {
 fn headless_place_cursor_places_on_clicks_and_esc_ends_it() {
     let (mut h, png) = setup();
     let files = json!([{"name": "a.png", "dataBase64": png}, {"name": "b.png", "dataBase64": png}, {"name": "c.png", "dataBase64": png}]);
-    let r = text(&call_tool(&mut h, "run_command", &json!({"command": "file.place.queue", "params": {"files": files}})));
+    let r = text(&call_tool(&mut h, "command_run", &json!({"id": "file.place.queue", "params": {"files": files}})));
     assert_eq!(r["count"], 3);
     assert_eq!(h.session.tool_id(), "place");
     let click = |x: f64| json!({"events": [{"kind": "down", "x": x, "y": 10}, {"kind": "up", "x": x, "y": 10}]});

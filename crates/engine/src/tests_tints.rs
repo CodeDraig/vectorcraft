@@ -175,7 +175,7 @@ fn converting_the_document_colour_mode_keeps_tints_exact() {
     let mut s = inks();
     let a = rect(&mut s);
     run(&mut s, "paint.setFill", json!({"swatch": "Brand", "tint": 30}));
-    run(&mut s, "object.convertDocumentColorMode", json!({"mode": "cmyk"}));
+    run(&mut s, "file.documentColorMode", json!({"mode": "cmyk"}));
     let base = doc(&s).global_color("Brand").unwrap();
     assert!(matches!(base, Color::Cmyk { .. }));
     assert_eq!(fill(&s, a), linked(base.tinted(0.3), "Brand", 0.3), "30 % of the converted swatch's inks");

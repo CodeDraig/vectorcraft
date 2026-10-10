@@ -11,8 +11,6 @@ use crate::tools::{call_tool, tool_definitions};
 
 /// The MCP revision we implement.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
-const MODERN_VERSION: &str = "2026-07-28";
-const SUPPORTED_VERSIONS: &[&str] = &[MODERN_VERSION, PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -34,7 +32,6 @@ vectorcraft://swatch/{name} read one thing at a time instead of the whole docume
 pub struct Server {
     backend: Box<dyn Backend>,
     initialized: bool,
-    modern: bool,
     /// Whether this server's client asked for log records (`logging/setLevel`). The queue is
     /// process-wide, so a server whose client didn't ask leaves it to the one that did.
     logging: bool,
@@ -50,7 +47,7 @@ fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
 
 impl Server {
     pub fn new(backend: Box<dyn Backend>) -> Self {
-        Self { backend, initialized: false, modern: false, logging: false }
+        Self { backend, initialized: false, logging: false }
     }
 
     pub fn backend(&mut self) -> &mut dyn Backend {
@@ -100,15 +97,6 @@ impl Server {
             return None;
         }
         let reply = match serde_json::from_str::<Value>(line) {
-            Ok(Value::Array(batch)) => {
-                // Batches were removed in 2025-06-18; still answer older clients sensibly.
-                if batch.is_empty() {
-                    Some(error(Value::Null, INVALID_REQUEST, "empty batch"))
-                } else {
-                    let replies: Vec<Value> = batch.into_iter().filter_map(|m| self.handle(m)).collect();
-                    (!replies.is_empty()).then_some(Value::Array(replies))
-                }
-            }
             Ok(msg) => self.handle(msg),
             Err(e) => Some(error(Value::Null, PARSE_ERROR, format!("parse error: {e}"))),
         };
@@ -138,26 +126,7 @@ impl Server {
         let r = vectorcraft_engine::guard::catch_panic(|| self.request(method, &params))
             .unwrap_or_else(|msg| Err((INTERNAL_ERROR, format!("internal error in `{method}`: {msg} (please report this bug)"))));
         Some(match r {
-            Ok(mut r) => {
-                let modern = params
-                    .get("_meta")
-                    .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
-                    .and_then(Value::as_str)
-                    .map_or(self.modern, |v| v == MODERN_VERSION);
-                if modern && let Some(result) = r.as_object_mut() {
-                    let ttl = match method {
-                        "tools/list" | "resources/list" | "resources/templates/list" | "prompts/list" => Some(600_000),
-                        "resources/read" | "prompts/get" => Some(0),
-                        _ => None,
-                    };
-                    if let Some(ttl) = ttl {
-                        result.insert("resultType".into(), json!("complete"));
-                        result.insert("ttlMs".into(), json!(ttl));
-                        result.insert("cacheScope".into(), json!("private"));
-                    }
-                }
-                response(id, r)
-            }
+            Ok(r) => response(id, r),
             Err((code, m)) => error(id, code, m),
         })
     }
@@ -172,23 +141,18 @@ impl Server {
 
     fn request(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
         match method {
-            "initialize" => {
-                let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
-                let version = if SUPPORTED_VERSIONS.contains(&asked) { asked } else { PROTOCOL_VERSION };
-                self.modern = version == MODERN_VERSION;
-                Ok(json!({
-                    "protocolVersion": version,
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {"listChanged": false},
-                        "completions": {},
-                        "logging": {},
-                    },
-                    "serverInfo": {"name": "vectorcraft", "title": "VectorCraft", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": format!("{INSTRUCTIONS} Backend: {}.", self.backend.describe()),
-                }))
-            }
+            "initialize" => Ok(json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {},
+                    "resources": {},
+                    "prompts": {"listChanged": false},
+                    "completions": {},
+                    "logging": {},
+                },
+                "serverInfo": {"name": "vectorcraft", "title": "VectorCraft", "version": env!("CARGO_PKG_VERSION")},
+                "instructions": format!("{INSTRUCTIONS} Backend: {}.", self.backend.describe()),
+            })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tool_definitions()})),
             "tools/call" => {

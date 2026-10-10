@@ -17,6 +17,24 @@ pub(crate) fn control(app: &mut VectorcraftApp, ctx: &egui::Context, method: &st
     assert_eq!(r["ok"], true, "{r}");
 }
 
+#[test]
+fn control_commands_use_documented_method_and_parameter_names() {
+    let mut app = VectorcraftApp::new(Session::new(), Default::default());
+    let ctx = egui::Context::default();
+    for (method, params) in
+        [("command", json!({"command": "file.new"})), ("engine.execute", json!({"id": "file.new"})), ("ui.menu.invoke", json!({"id": "file.new"}))]
+    {
+        let (req, _rx) = ControlRequest::new(method, params);
+        let Outcome::Done(reply) = crate::control::handle(&mut app, &ctx, &req) else { panic!("not done") };
+        assert_eq!(reply["ok"], false, "{reply}");
+    }
+    assert!(app.session.documents().is_empty(), "rejected aliases must not execute");
+    for method in ["engine.execute", "ui.menu.invoke"] {
+        control(&mut app, &ctx, method, json!({"command": "file.new"}));
+    }
+    assert_eq!(app.session.documents().len(), 2);
+}
+
 /// Frames through the host's input hook until the synthetic queue is drained, and one more (the
 /// keyboard's modifiers come back); `draw` lays out what the input reaches. → the modifiers
 /// held in each frame.

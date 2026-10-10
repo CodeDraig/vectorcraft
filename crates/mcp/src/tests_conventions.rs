@@ -17,17 +17,7 @@ fn payload(r: &Value) -> Value {
 fn conventions_catalog_and_strict_keys() {
     let mut s = Server::new(Box::new(Headless::with_document()));
     let tools = tool_definitions();
-    for name in [
-        "command_list",
-        "command_run",
-        "command_batch",
-        "doc_inspect",
-        "render_preview",
-        "ui_inspect",
-        "ui_screenshot",
-        "list_commands",
-        "run_command",
-    ] {
+    for name in ["command_list", "command_run", "command_batch", "doc_inspect", "render_preview", "ui_inspect", "ui_screenshot"] {
         assert!(tools.iter().any(|t| t["name"] == name), "missing {name}");
     }
     for t in tools {
@@ -46,6 +36,11 @@ fn conventions_commands_batch_and_bounded_preview() {
     let list = call(&mut s, "command_list", json!({"filter":"shape.rectangle","enabled_only":true}));
     assert_eq!(list["isError"], false, "{list}");
     assert!(payload(&list).as_array().unwrap().iter().any(|c| c["id"] == "shape.rectangle"));
+    let all = payload(&call(&mut s, "command_list", json!({"filter":"edit.undo"})));
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert_eq!(all[0]["enabled"], false);
+    let enabled = payload(&call(&mut s, "command_list", json!({"filter":"edit.undo","enabled_only":true})));
+    assert!(enabled.as_array().unwrap().is_empty());
     let steps = json!([{"id":"shape.rectangle","params":{"x":10,"y":20,"width":30,"height":40}}, {"id":"no.such.command"}, {"id":"shape.rectangle","params":{"x":0,"y":0,"width":20,"height":20}}]);
     for (stop, total) in [(true, 2), (false, 3)] {
         let r = call(&mut s, "command_batch", json!({"steps":steps,"stop_on_error":stop}));
@@ -85,47 +80,47 @@ impl Backend for Panics {
 #[test]
 fn conventions_tool_panics_are_tool_errors() {
     let mut s = Server::new(Box::new(Panics));
-    let r = call(&mut s, "list_commands", json!({}));
+    let r = call(&mut s, "command_list", json!({}));
     assert_eq!(r["isError"], true);
     assert!(r["content"][0]["text"].as_str().unwrap().contains("backend bug"));
     assert_eq!(rpc(&mut s, "ping", json!({}))["result"], json!({}));
 }
 
 #[test]
-fn conventions_resources_and_versioned_results() {
+fn conventions_resources_use_only_the_current_protocol() {
     let mut s = Server::new(Box::new(Headless::with_document()));
-    let modern = json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28"});
-    for (method, extra, ttl) in [
-        ("tools/list", json!({}), 600_000),
-        ("resources/list", json!({}), 600_000),
-        ("resources/templates/list", json!({}), 600_000),
-        ("prompts/list", json!({}), 600_000),
-        ("resources/read", json!({"uri":"vectorcraft://document"}), 0),
-        ("resources/read", json!({"uri":"vectorcraft://commands"}), 0),
+    rpc(&mut s, "initialize", json!({"protocolVersion":"2026-07-28"}));
+    for (method, extra) in [
+        ("tools/list", json!({})),
+        ("resources/list", json!({})),
+        ("resources/templates/list", json!({})),
+        ("prompts/list", json!({})),
+        ("resources/read", json!({"uri":"vectorcraft://document"})),
+        ("resources/read", json!({"uri":"vectorcraft://commands"})),
     ] {
-        let legacy = rpc(&mut s, method, extra.clone());
-        assert!(legacy["result"].is_object(), "{legacy}");
-        assert!(legacy["result"].get("resultType").is_none());
-        let mut params = extra.clone();
-        params["_meta"] = modern.clone();
-        let r = rpc(&mut s, method, params);
-        assert_eq!(r["result"]["resultType"], "complete", "{r}");
-        assert_eq!(r["result"]["ttlMs"], ttl);
-        assert_eq!(r["result"]["cacheScope"], "private");
-        let mut stripped = r["result"].clone();
+        let current = rpc(&mut s, method, extra.clone());
+        assert!(current["result"].is_object(), "{current}");
         for key in ["resultType", "ttlMs", "cacheScope"] {
-            stripped.as_object_mut().unwrap().remove(key);
+            assert!(current["result"].get(key).is_none());
         }
-        assert_eq!(stripped, legacy["result"]);
-        assert!(rpc(&mut s, method, extra)["result"].get("resultType").is_none());
+        let mut params = extra;
+        params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28"});
+        assert_eq!(rpc(&mut s, method, params)["result"], current["result"]);
     }
     let r = rpc(&mut s, "resources/list", json!({}));
     assert!(r["result"]["resources"].as_array().unwrap().iter().any(|r| r["uri"] == "vectorcraft://commands"));
     let commands = rpc(&mut s, "resources/read", json!({"uri":"vectorcraft://commands"}));
     let commands: Value = serde_json::from_str(commands["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(commands, payload(&call(&mut s, "command_list", json!({}))));
-    assert_eq!(rpc(&mut s, "initialize", json!({"protocolVersion":"2026-07-28"}))["result"]["protocolVersion"], "2026-07-28");
-    assert_eq!(rpc(&mut s, "tools/list", json!({}))["result"]["resultType"], "complete");
-    rpc(&mut s, "initialize", json!({"protocolVersion":"2025-06-18"}));
-    assert!(rpc(&mut s, "tools/list", json!({}))["result"].get("resultType").is_none());
+}
+
+#[test]
+fn removed_tool_names_are_not_advertised_or_executed() {
+    let mut s = Server::new(Box::new(Headless::with_document()));
+    for name in ["list_commands", "run_command", "inspect_document", "inspect_ui"] {
+        assert!(!tool_definitions().iter().any(|t| t["name"] == name));
+        let r = call(&mut s, name, json!({}));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("unknown tool"));
+    }
 }

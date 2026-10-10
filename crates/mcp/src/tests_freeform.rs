@@ -12,7 +12,7 @@ fn ok(h: &mut Headless, name: &str, args: Value) -> Value {
 }
 
 fn freeform(h: &mut Headless) -> Value {
-    ok(h, "run_command", json!({"command": "paint.freeform.get"}))
+    ok(h, "command_run", json!({"id": "paint.freeform.get"}))
 }
 
 fn click(h: &mut Headless, x: f64, y: f64) -> Value {
@@ -30,7 +30,7 @@ fn freeform_points_and_lines_on_the_canvas() {
     let mut h = Headless::new();
     h.call("engine.execute", json!({"command": "file.new", "params": {"width": 300, "height": 300}})).unwrap();
     ok(&mut h, "draw_shape", json!({"shape": "rectangle", "x": 100, "y": 100, "width": 100, "height": 100}));
-    ok(&mut h, "run_command", json!({"command": "paint.editGradient", "params": {"kind": "freeform", "mode": "lines"}}));
+    ok(&mut h, "command_run", json!({"id": "paint.editGradient", "params": {"kind": "freeform", "mode": "lines"}}));
     let n = freeform(&mut h)["points"].as_array().unwrap().len();
     // Lines mode: three clicks draw one line through three new points.
     for (x, y) in [(110.0, 190.0), (150.0, 170.0), (190.0, 190.0)] {

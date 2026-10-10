@@ -33,6 +33,20 @@ fn tmp(name: &str) -> std::path::PathBuf {
     dir.join(name)
 }
 
+#[test]
+fn control_commands_use_documented_method_and_parameter_names() {
+    let mut backend = Headless::new();
+    assert!(backend.call("command", json!({"command": "file.new"})).is_err());
+    for method in ["engine.execute", "ui.menu.invoke"] {
+        assert!(backend.call(method, json!({"id": "file.new"})).is_err());
+    }
+    assert!(backend.session.documents().is_empty(), "rejected aliases must not execute");
+    for method in ["engine.execute", "ui.menu.invoke"] {
+        backend.call(method, json!({"command": "file.new"})).unwrap();
+    }
+    assert_eq!(backend.session.documents().len(), 2);
+}
+
 // ---------- framing ----------
 
 #[test]
@@ -57,12 +71,17 @@ fn framing_basics() {
     assert_eq!(s.handle_line(r#"{"jsonrpc":"2.0","id":9,"result":{}}"#), None);
     // ping
     assert_eq!(rpc(&mut s, 4, "ping", json!({}))["result"], json!({}));
-    // Batch (legacy clients).
+    // Arrays are invalid requests; no contained notification may run.
+    let mut s = server();
+    assert!(!s.is_initialized());
     let v: Value = serde_json::from_str(
         &s.handle_line(r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"}]"#).unwrap(),
     )
     .unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v["error"]["code"], -32600);
+    assert!(!s.is_initialized());
+    let empty: Value = serde_json::from_str(&s.handle_line("[]").unwrap()).unwrap();
+    assert_eq!(empty["error"]["code"], -32600);
 }
 
 #[test]
@@ -88,10 +107,10 @@ fn serve_loop_writes_one_line_per_request() {
 #[test]
 fn initialize_negotiates_version() {
     let mut s = server();
-    let v = rpc(&mut s, 1, "initialize", json!({"protocolVersion": "2025-03-26"}));
-    assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
-    let v = rpc(&mut s, 2, "initialize", json!({"protocolVersion": "1999-01-01"}));
-    assert_eq!(v["result"]["protocolVersion"], PROTOCOL_VERSION);
+    for version in [PROTOCOL_VERSION, "2025-03-26", "2024-11-05", "2026-07-28", "1999-01-01"] {
+        let v = rpc(&mut s, 1, "initialize", json!({"protocolVersion": version}));
+        assert_eq!(v["result"]["protocolVersion"], PROTOCOL_VERSION);
+    }
 }
 
 // ---------- tools/list ----------
@@ -117,10 +136,10 @@ fn tool_schemas_are_valid() {
         }
     }
     for want in [
-        "list_commands",
-        "run_command",
-        "inspect_document",
-        "inspect_ui",
+        "command_list",
+        "command_run",
+        "doc_inspect",
+        "ui_inspect",
         "select_tool",
         "pointer_gesture",
         "draw_path",
@@ -166,7 +185,7 @@ fn headless_end_to_end() {
     );
     assert_eq!(r["isError"], false, "{r}");
 
-    let r = call(&mut s, 4, "inspect_document", json!({}));
+    let r = call(&mut s, 4, "doc_inspect", json!({}));
     let doc: Value = serde_json::from_str(&text_of(&r)).unwrap();
     assert!(doc["objects"].as_u64().unwrap() >= 3, "{doc}");
     let layer = &doc["layers"][0];
@@ -177,12 +196,12 @@ fn headless_end_to_end() {
 
     // A depth-0 inspect is the skeleton: top layers with counts, nothing below them;
     // a bad slice is a tool error, not a full dump.
-    let r = call(&mut s, 41, "inspect_document", json!({"depth": 0}));
+    let r = call(&mut s, 41, "doc_inspect", json!({"depth": 0}));
     let skel: Value = serde_json::from_str(&text_of(&r)).unwrap();
     assert!(skel["layers"][0].get("children").is_none(), "{skel}");
     assert_eq!(skel["layers"][0]["childCount"], layer["children"].as_array().unwrap().len());
     assert_eq!(skel["artboards"], doc["artboards"]);
-    assert_eq!(call(&mut s, 42, "inspect_document", json!({"depth": -1}))["isError"], true);
+    assert_eq!(call(&mut s, 42, "doc_inspect", json!({"depth": -1}))["isError"], true);
 
     // Screenshot returns image content (base64 PNG) and text.
     let shot_path = tmp("shot.png");
@@ -217,7 +236,7 @@ fn headless_end_to_end() {
     for (id, p) in [(21, &pdf_path), (22, &ai_path)] {
         let r = call(&mut s, id, "open_file", json!({"path": p.to_str().unwrap()}));
         assert_eq!(r["isError"], false, "{r}");
-        let doc: Value = serde_json::from_str(&text_of(&call(&mut s, id + 10, "inspect_document", json!({})))).unwrap();
+        let doc: Value = serde_json::from_str(&text_of(&call(&mut s, id + 10, "doc_inspect", json!({})))).unwrap();
         assert!(doc["objects"].as_u64().unwrap() >= 2, "{doc}");
     }
 
@@ -237,7 +256,7 @@ fn headless_end_to_end() {
 fn headless_path_gesture_undo() {
     let mut s = server();
     let count = |s: &mut Server| -> u64 {
-        let r = call(s, 90, "inspect_document", json!({}));
+        let r = call(s, 90, "doc_inspect", json!({}));
         serde_json::from_str::<Value>(&text_of(&r)).unwrap()["objects"].as_u64().unwrap()
     };
     let base = count(&mut s);
@@ -267,17 +286,16 @@ fn headless_path_gesture_undo() {
     assert_eq!(r["isError"], false, "{r}");
     assert_eq!(count(&mut s), base + 2);
 
-    // Long tail through run_command + list_commands filter.
-    let r = call(&mut s, 7, "run_command", json!({"command": "select.all"}));
+    // Long tail through command_run + command_list filter.
+    let r = call(&mut s, 7, "command_run", json!({"id": "select.all"}));
     assert_eq!(r["isError"], false, "{r}");
-    let r = call(&mut s, 8, "run_command", json!({"command": "object.group"}));
+    let r = call(&mut s, 8, "command_run", json!({"id": "object.group"}));
     assert_eq!(r["isError"], false, "{r}");
-    let r = call(&mut s, 9, "list_commands", json!({"filter": "group"}));
+    let r = call(&mut s, 9, "command_list", json!({"filter": "group"}));
     let v: Value = serde_json::from_str(&text_of(&r)).unwrap();
-    assert!(v["commands"].as_array().unwrap().iter().any(|c| c["id"] == "object.group"));
+    assert!(v.as_array().unwrap().iter().any(|c| c["id"] == "object.group"));
     assert!(
-        v["commands"]
-            .as_array()
+        v.as_array()
             .unwrap()
             .iter()
             .all(|c| c["id"].as_str().unwrap().contains("group") || c["label"].as_str().unwrap().to_lowercase().contains("group"))
@@ -293,15 +311,15 @@ fn headless_path_gesture_undo() {
     assert_eq!(&std::fs::read(tmp("x.png")).unwrap()[..4], b"\x89PNG");
 }
 
-/// inspect_document reads back the paint type's characters show, as add_text and set_paint give it.
+/// doc_inspect reads back the paint type's characters show, as add_text and set_paint give it.
 #[test]
-fn inspect_document_reports_the_paint_of_type() {
+fn doc_inspect_reports_the_paint_of_type() {
     let mut s = server();
     let r = call(&mut s, 2, "add_text", json!({"text": "HI", "x": 50, "y": 60, "size": 24, "color": "#ff0000"}));
     assert_eq!(r["isError"], false, "{r}");
     let id = serde_json::from_str::<Value>(&text_of(&r)).unwrap()["id"].clone();
     let node = |s: &mut Server, n: u64| {
-        let v: Value = serde_json::from_str(&text_of(&call(s, n, "inspect_document", json!({})))).unwrap();
+        let v: Value = serde_json::from_str(&text_of(&call(s, n, "doc_inspect", json!({})))).unwrap();
         v["layers"][0]["children"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap()
     };
     let t = node(&mut s, 3);
@@ -333,15 +351,15 @@ fn errors_are_tool_results_not_crashes() {
         ("draw_shape", json!({})),
         ("draw_path", json!({"points": [[1]]})),
         ("draw_path", json!({})),
-        ("run_command", json!({"command": "does.not.exist"})),
-        ("run_command", json!({"command": "object.move", "params": 5})),
-        ("run_command", json!({})),
+        ("command_run", json!({"id": "does.not.exist"})),
+        ("command_run", json!({"id": "object.move", "params": 5})),
+        ("command_run", json!({})),
         ("pointer_gesture", json!({"events": [{"kind": "wiggle", "x": 0, "y": 0}]})),
         ("pointer_gesture", json!({"events": []})),
         ("select_tool", json!({"tool": "laser"})),
         ("set_paint", json!({})),
         ("set_paint", json!({"fill": "#zzzzzz"})),
-        ("inspect_ui", json!({})),
+        ("ui_inspect", json!({})),
         ("open_panel", json!({"panel": "Layers"})),
         ("type_text", json!({"text": "hi"})),
         ("screenshot", json!({"window": true})),
@@ -362,7 +380,7 @@ fn errors_are_tool_results_not_crashes() {
     let v = rpc(&mut s, 101, "tools/call", json!({}));
     assert_eq!(v["error"]["code"], -32602);
     // The server still works afterwards.
-    let r = call(&mut s, 102, "inspect_document", json!({}));
+    let r = call(&mut s, 102, "doc_inspect", json!({}));
     assert_eq!(r["isError"], false);
 }
 
@@ -398,11 +416,11 @@ fn fake_app() -> (String, std::thread::JoinHandle<Vec<Value>>) {
 fn remote_forwards_methods() {
     let (addr, h) = fake_app();
     let mut s = Server::new(Box::new(Remote::connect(&addr).unwrap()));
-    let r = call(&mut s, 1, "inspect_document", json!({}));
+    let r = call(&mut s, 1, "doc_inspect", json!({}));
     assert!(text_of(&r).contains("Remote"));
-    let r = call(&mut s, 2, "run_command", json!({"command": "object.group"}));
+    let r = call(&mut s, 2, "command_run", json!({"id": "object.group"}));
     assert!(text_of(&r).contains("object.group"), "{r}");
-    let r = call(&mut s, 3, "inspect_ui", json!({}));
+    let r = call(&mut s, 3, "ui_inspect", json!({}));
     assert_eq!(r["isError"], false, "{r}");
     let r = call(&mut s, 4, "open_panel", json!({"panel": "Layers"}));
     assert_eq!(r["isError"], true);
@@ -450,7 +468,7 @@ fn id_of(result: &Value) -> u64 {
 }
 
 fn doc_json(s: &mut Server) -> Value {
-    let r = call(s, 900, "run_command", json!({"command": "document.json"}));
+    let r = call(s, 900, "command_run", json!({"id": "document.json"}));
     serde_json::from_str(&text_of(&r)).unwrap()
 }
 
@@ -500,7 +518,7 @@ fn text_effect_pathfinder_transform_graph_and_wrap_tools() {
 fn oversized_screenshot_and_png_export_are_errors() {
     // 16383 pt at the maximum scale (16) is 262 128 px a side: an error result, not a crashed server.
     let mut s = server();
-    let r = call(&mut s, 1, "run_command", json!({"command": "file.new", "params": {"width": 16383, "height": 16383}}));
+    let r = call(&mut s, 1, "command_run", json!({"id": "file.new", "params": {"width": 16383, "height": 16383}}));
     assert_eq!(r["isError"], false, "{r}");
     let r = call(&mut s, 2, "screenshot", json!({"scale": 16}));
     assert_eq!(r["isError"], true, "{r}");
@@ -533,7 +551,7 @@ fn selection_preferences_apply_to_pointer_gestures() {
     };
     assert_eq!(click(&mut s, 3, 175.0, json!({})), json!([front]));
     assert_eq!(click(&mut s, 4, 175.0, json!({"cmd": true})), json!([back]), "Cmd-click selects behind");
-    let r = call(&mut s, 5, "run_command", json!({"command": "prefs.set", "params": {"key": "objectSelectionByPathOnly", "value": true}}));
+    let r = call(&mut s, 5, "command_run", json!({"id": "prefs.set", "params": {"key": "objectSelectionByPathOnly", "value": true}}));
     assert_eq!(r["isError"], false, "{r}");
     assert_eq!(click(&mut s, 6, 225.0, json!({})), json!([]), "path only: the fill doesn't select");
     assert_eq!(click(&mut s, 7, 250.0, json!({})), json!([front]), "the path does");
@@ -549,7 +567,7 @@ fn shift_marquee_gesture_toggles_the_selection() {
         serde_json::from_str::<Value>(&text_of(&r)).unwrap()["id"].as_u64().unwrap()
     };
     let (a, b, c) = (square(&mut s, 1, 100), square(&mut s, 2, 200), square(&mut s, 3, 300));
-    let r = call(&mut s, 4, "run_command", json!({"command": "select.set", "params": {"ids": [a, b]}}));
+    let r = call(&mut s, 4, "command_run", json!({"id": "select.set", "params": {"ids": [a, b]}}));
     assert_eq!(r["isError"], false, "{r}");
     let events = json!([{"kind": "down", "x": 180, "y": 80}, {"kind": "drag", "x": 300, "y": 200}, {"kind": "up", "x": 380, "y": 200}]);
     for tool in ["selection", "directSelection"] {
@@ -573,14 +591,14 @@ fn type_preferences_apply_to_agents() {
     assert_eq!(r["isError"], false, "{r}");
     let id = serde_json::from_str::<Value>(&text_of(&r)).unwrap()["selection"][0].as_u64().unwrap();
     let style = |s: &mut Server, n: u64| {
-        let r = call(s, n, "run_command", json!({"command": "text.getRange", "params": {"id": id}}));
+        let r = call(s, n, "command_run", json!({"id": "text.getRange", "params": {"id": id}}));
         let v = serde_json::from_str::<Value>(&text_of(&r)).unwrap();
         assert!(v["text"].as_str().unwrap().len() > 10, "placeholder text: {v}");
         let st = &v["runs"][0]["style"];
         (st["size"].as_f64().unwrap(), st["tracking"].as_f64().unwrap())
     };
     let (size, tracking) = style(&mut s, 2);
-    let r = call(&mut s, 3, "run_command", json!({"command": "prefs.set", "params": {"values": {"typeSizeIncrement": 4, "trackingIncrement": 50}}}));
+    let r = call(&mut s, 3, "command_run", json!({"id": "prefs.set", "params": {"values": {"typeSizeIncrement": 4, "trackingIncrement": 50}}}));
     assert_eq!(r["isError"], false, "{r}");
     let r = call(&mut s, 4, "press_key", json!({"key": "Right", "mods": {"alt": true}}));
     assert_eq!(r["isError"], false, "{r}");
@@ -595,7 +613,7 @@ fn type_preferences_apply_to_agents() {
 #[test]
 fn drawing_gestures_snap_to_smart_guides() {
     let mut s = server();
-    let r = call(&mut s, 1, "run_command", json!({"command": "file.new", "params": {"width": 800, "height": 600}}));
+    let r = call(&mut s, 1, "command_run", json!({"id": "file.new", "params": {"width": 800, "height": 600}}));
     assert_eq!(r["isError"], false, "{r}");
     let r = call(&mut s, 2, "draw_shape", json!({"shape": "rectangle", "x": 100, "y": 100, "width": 100, "height": 100}));
     assert_eq!(r["isError"], false, "{r}");
@@ -603,14 +621,14 @@ fn drawing_gestures_snap_to_smart_guides() {
         let r = call(s, n, "pointer_gesture", json!({"tool": tool, "events": events}));
         assert_eq!(r["isError"], false, "{r}");
         let id = serde_json::from_str::<Value>(&text_of(&r)).unwrap()["selection"][0].clone();
-        let doc: Value = serde_json::from_str(&text_of(&call(s, n + 1, "inspect_document", json!({})))).unwrap();
+        let doc: Value = serde_json::from_str(&text_of(&call(s, n + 1, "doc_inspect", json!({})))).unwrap();
         let made = doc["layers"][0]["children"].as_array().unwrap().iter().find(|c| c["id"] == id).expect("drawn").clone();
         let b = &made["bounds"];
         [&b["x"], &b["y"], &b["width"], &b["height"]].map(|v| v.as_f64().unwrap())
     };
     let events = json!([{"kind": "move", "x": 202, "y": 203}, {"kind": "down", "x": 202, "y": 203}, {"kind": "drag", "x": 330, "y": 341}, {"kind": "up", "x": 330, "y": 341}]);
     assert_eq!(bounds(&mut s, 3, events, "rectangle"), [200.0, 200.0, 130.0, 141.0]);
-    let r = call(&mut s, 5, "run_command", json!({"command": "select.none", "params": {}}));
+    let r = call(&mut s, 5, "command_run", json!({"id": "select.none", "params": {}}));
     assert_eq!(r["isError"], false, "{r}");
     let events = json!([{"kind": "down", "x": 300, "y": 420}, {"kind": "up", "x": 300, "y": 420}, {"kind": "move", "x": 151.5, "y": 431}, {"kind": "down", "x": 151.5, "y": 431}, {"kind": "up", "x": 151.5, "y": 431}]);
     assert_eq!(bounds(&mut s, 6, events, "pen"), [150.0, 420.0, 150.0, 11.0]);

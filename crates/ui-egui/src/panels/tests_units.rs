@@ -47,7 +47,7 @@ fn panels_show_millimetres_after_the_preference_changes() {
     assert!(shows(&texts(&mut app, crate::chrome::control_bar), &side_mm()), "Control bar");
     assert!(shows(&texts(&mut app, info::show), &format!("W: {}", side_mm())), "Info panel");
     // Document Setup back to points: everything follows the document.
-    run(&mut app, "document.setUnits", json!({"units": "Points"}));
+    run(&mut app, "document.setup", json!({"units": "Points"}));
     assert!(shows(&texts(&mut app, transform::show), "100 pt"));
 }
 
@@ -90,7 +90,7 @@ fn type_sizes_follow_units_type() {
 #[test]
 fn the_preferences_dialog_shows_the_documents_units() {
     let mut app = app_with_rect();
-    run(&mut app, "document.setUnits", json!({"units": "Millimeters"}));
+    run(&mut app, "document.setup", json!({"units": "Millimeters"}));
     crate::prefs_dialog::open(&mut app, Some("General"));
     assert_eq!(app.ui.dialog.as_ref().unwrap().fields["unitsGeneral"], json!("millimeters"));
     let inc = app.session.prefs.keyboard_increment;

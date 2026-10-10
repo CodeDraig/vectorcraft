@@ -160,14 +160,14 @@ fn mcp_protocol_over_stdio() {
     send(&mut stdin, json!({"jsonrpc":"2.0","id":10,"method":"resources/read","params":{"uri":"vectorcraft://object/"}}));
     assert_eq!(recv(&mut lines, &mut notes, 10)["error"]["code"], -32602);
 
-    // Large containers slice through run_command document.node: a truncated level reports
+    // Large containers slice through command_run document.node: a truncated level reports
     // childCount, and a bad limit is a tool error, not a crash or a full read.
     send(
         &mut stdin,
         json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"draw_shape","arguments":{"shape":"ellipse","x":90,"y":10,"width":30,"height":30}}}),
     );
     assert_eq!(recv(&mut lines, &mut notes, 20)["result"]["isError"], false);
-    let run = |id: u64, command: &str, params: Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"run_command","arguments":{"command":command,"params":params}}});
+    let run = |id: u64, command: &str, params: Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"command_run","arguments":{"id":command,"params":params}}});
     send(&mut stdin, run(21, "select.all", json!({})));
     recv(&mut lines, &mut notes, 21);
     send(&mut stdin, run(22, "object.group", json!({})));

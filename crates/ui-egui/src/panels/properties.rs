@@ -312,7 +312,7 @@ fn document_sections(app: &mut VectorcraftApp, ui: &mut Ui) {
         dim_label(ui, tl!("Units"));
         let labels: Vec<&str> = Unit::ALL.iter().map(|u| u.label()).collect();
         if let Some(i) = widgets::dropdown(ui, "units", units.label(), &labels, 140.0) {
-            app.run("document.setUnits", json!({"units": labels[i]})).ok();
+            app.run("document.setup", json!({"units": labels[i]})).ok();
         }
     });
     let w = (ui.available_width() - 6.0) / 2.0;

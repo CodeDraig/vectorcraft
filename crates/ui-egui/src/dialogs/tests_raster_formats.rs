@@ -38,7 +38,7 @@ fn jpeg_options_pick_the_colour_model_method_and_profile() {
     assert!(file.windows(12).any(|w| w == b"ICC_PROFILE\0"));
 
     // A CMYK document exports CMYK by default.
-    app.run("object.convertDocumentColorMode", json!({"mode": "cmyk"})).unwrap();
+    app.run("file.documentColorMode", json!({"mode": "cmyk"})).unwrap();
     app.run("file.exportAs", json!({"format": "jpg"})).unwrap();
     confirm(&mut app).unwrap();
     assert_eq!(app.ui.dialog.as_ref().unwrap().str("colorModel"), "cmyk");

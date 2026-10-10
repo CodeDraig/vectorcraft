@@ -150,7 +150,7 @@ fn framing_never_panics_on_malformed_messages() {
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":5}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\"}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"nope\"}}",
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"run_command\",\"arguments\":[]}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"command_run\",\"arguments\":[]}}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"nope://x\"}}",
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1900-01-01\"}}",
         "\u{0}\u{1}",
@@ -438,10 +438,10 @@ fn undo_redo_tools_restore_documents() {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 24, failure_persistence: None, ..ProptestConfig::default() })]
 
-    /// Random engine command sequences through `run_command` keep the document valid and the
+    /// Random engine command sequences through `command_run` keep the document valid and the
     /// server responsive; the result equals running the same commands on a local session.
     #[test]
-    fn run_command_sequences_match_local_session(ops in arb_ops(5..40)) {
+    fn command_run_sequences_match_local_session(ops in arb_ops(5..40)) {
         let mut srv = server();
         // Match the headless default document, dated as it is (File Info dates come from the clock).
         let d_remote = doc_json(&document(&mut srv));
@@ -453,7 +453,7 @@ proptest! {
         for op in &ops {
             let (id, params) = op.command(&local);
             let a = local.execute(&id, &params).is_ok();
-            let v = call(&mut srv, "run_command", json!({"command": id, "params": params}));
+            let v = call(&mut srv, "command_run", json!({"id": id, "params": params}));
             let b = v["result"]["isError"] != json!(true);
             prop_assert_eq!(a, b, "`{}` {}: local ok={} mcp ok={} ({})", id, params, a, b, v);
         }
@@ -482,8 +482,8 @@ fn tools_never_leave_interactions_open() {
         ("pointer_gesture", json!({"tool": "ellipse", "events": [{"kind": "up", "x": 0, "y": 0}]})),
         ("press_key", json!({"key": "Escape"})),
         (
-            "run_command",
-            json!({"command": "command.batch", "params": {"commands": [{"command": "shape.rectangle", "params": {"x": 0, "y": 0, "width": 5, "height": 5}}, {"command": "nope"}]}}),
+            "command_run",
+            json!({"id": "command.batch", "params": {"commands": [{"command": "shape.rectangle", "params": {"x": 0, "y": 0, "width": 5, "height": 5}}, {"command": "nope"}]}}),
         ),
     ];
     let mut failures = vec![];

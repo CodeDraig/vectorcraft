@@ -42,7 +42,7 @@ fn psd_options_pick_flat_or_layers_and_the_colour_model() {
     assert_eq!((u16::from_be_bytes([psd[12], psd[13]]), u16::from_be_bytes([psd[24], psd[25]])), (1, 1), "one grey channel");
 
     // A CMYK document exports CMYK by default.
-    app.run("object.convertDocumentColorMode", json!({"mode": "cmyk"})).unwrap();
+    app.run("file.documentColorMode", json!({"mode": "cmyk"})).unwrap();
     app.run("file.exportAs", json!({"format": "psd"})).unwrap();
     confirm(&mut app).unwrap();
     assert_eq!(app.ui.dialog.as_ref().unwrap().str("colorModel"), "cmyk");

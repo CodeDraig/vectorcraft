@@ -13,7 +13,7 @@ fn ok(h: &mut Headless, name: &str, args: Value) -> Value {
 }
 
 fn run(h: &mut Headless, command: &str, params: Value) -> Value {
-    ok(h, "run_command", json!({"command": command, "params": params}))
+    ok(h, "command_run", json!({"id": command, "params": params}))
 }
 
 fn exists(h: &Headless, id: u64) -> bool {

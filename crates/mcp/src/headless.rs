@@ -23,7 +23,7 @@ impl Default for Headless {
 }
 
 /// Commands the desktop app adds on top of the engine; the headless backend implements them too so
-/// `run_command` behaves the same in both modes.
+/// `command_run` behaves the same in both modes.
 const HOST_COMMANDS: &[(&str, &str, &str)] = &[
     ("file.open", "Open…", "{path} open any readable file (see document.formats) as a new document; templates open untitled"),
     (
@@ -262,8 +262,8 @@ impl Backend for Headless {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let p = &params;
         match method {
-            "engine.execute" | "ui.menu.invoke" | "command" => {
-                let id = s(p, "command").or(s(p, "id")).ok_or("missing `command`")?.to_string();
+            "engine.execute" | "ui.menu.invoke" => {
+                let id = s(p, "command").ok_or("missing `command`")?.to_string();
                 let params = match p.get("params") {
                     None | Some(Value::Null) => json!({}),
                     Some(v) => v.clone(),

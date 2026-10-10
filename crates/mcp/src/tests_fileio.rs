@@ -179,7 +179,7 @@ fn document_color_mode_puts_rgb_greys_on_the_black_plate() {
     let close = |ks: &[f32]| ks.len() == want.len() && ks.iter().zip(want).all(|(k, w)| (k - w).abs() < 0.005);
     let mut h = Headless::new();
     text(&call_tool(&mut h, "open_file", &json!({"path": svg})));
-    let r = text(&call_tool(&mut h, "run_command", &json!({"command": "file.documentColorMode", "params": {"mode": "cmyk", "grays": "black"}})));
+    let r = text(&call_tool(&mut h, "command_run", &json!({"id": "file.documentColorMode", "params": {"mode": "cmyk", "grays": "black"}})));
     assert_eq!(r["changed"], 4);
     let ks = k_only(&h);
     assert!(close(&ks), "{ks:?}");
@@ -191,10 +191,10 @@ fn document_color_mode_puts_rgb_greys_on_the_black_plate() {
     assert!(close(&ks), "{ks:?}");
     // document.open takes the same option.
     let mut o = Headless::new();
-    let r = call_tool(&mut o, "run_command", &json!({"command": "document.open", "params": {"path": svg, "colorMode": "cmyk", "grays": "black"}}));
+    let r = call_tool(&mut o, "command_run", &json!({"id": "document.open", "params": {"path": svg, "colorMode": "cmyk", "grays": "black"}}));
     text(&r);
     let ks = k_only(&o);
     assert!(close(&ks), "{ks:?}");
-    let bad = call_tool(&mut o, "run_command", &json!({"command": "file.documentColorMode", "params": {"mode": "rgb", "grays": "rich"}}));
+    let bad = call_tool(&mut o, "command_run", &json!({"id": "file.documentColorMode", "params": {"mode": "rgb", "grays": "rich"}}));
     assert!(bad.is_error, "{bad:?}");
 }

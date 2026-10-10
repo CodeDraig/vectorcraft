@@ -46,7 +46,7 @@ fn new_documents_start_in_the_preference_and_document_setup_only_changes_the_doc
     assert_eq!(units(&s), Unit::Inches);
     s.execute("file.new", &json!({"width": 100, "height": 100, "units": "Pixels"})).unwrap();
     assert_eq!((units(&s), s.general_unit()), (Unit::Pixels, Unit::Pixels), "given units win");
-    s.execute("document.setUnits", &json!({"units": "cm"})).unwrap();
+    s.execute("document.setup", &json!({"units": "cm"})).unwrap();
     assert_eq!((units(&s), s.default_units()), (Unit::Centimeters, Unit::Inches));
     // Each document keeps its own units.
     s.execute("document.activate", &json!({"index": 0})).unwrap();
@@ -57,7 +57,7 @@ fn new_documents_start_in_the_preference_and_document_setup_only_changes_the_doc
 #[test]
 fn document_setup_without_a_document_fails() {
     let mut s = Session::new();
-    assert!(s.execute("document.setUnits", &json!({"units": "mm"})).is_err());
+    assert!(s.execute("document.setup", &json!({"units": "mm"})).is_err());
     // The preference alone still changes.
     s.execute("prefs.set", &json!({"key": "unitsGeneral", "value": "Millimeters"})).unwrap();
     assert_eq!(s.prefs.units_general, "millimeters");
@@ -116,7 +116,7 @@ fn canvas_measurement_labels_follow_the_units() {
 #[test]
 fn units_survive_a_native_round_trip() {
     let mut s = session();
-    s.execute("document.setUnits", &json!({"units": "Feet & Inches"})).unwrap();
+    s.execute("document.setup", &json!({"units": "Feet & Inches"})).unwrap();
     let back = vectorcraft_format::load(&vectorcraft_format::save(&s.doc().unwrap().doc, false)).unwrap();
     assert_eq!(back.units, Unit::FeetInches);
 }

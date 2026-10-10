@@ -7,7 +7,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde_json::json;
 use vectorcraft_color::cms;
-use vectorcraft_engine::cmd::colormgmt::{PROFILES_KEY, doc_profiles};
+use vectorcraft_doc::profiles::LEGACY_PROFILES_KEY;
+use vectorcraft_engine::cmd::colormgmt::doc_profiles;
 use vectorcraft_testkit::fixtures::session;
 
 /// The active Color Settings: one test at a time.
@@ -47,7 +48,7 @@ fn legacy_profile_name_resolves_in_commands_and_files() {
     assert_eq!(r["rgb"], cms::WIDE_GAMUT_RGB, "stored under the current name");
     // A document saved by an older version names the profile the old way.
     let mut d = (*s.doc().unwrap().doc).clone();
-    d.unknown.insert(PROFILES_KEY.into(), json!({"rgb": old, "cmyk": null}));
+    d.unknown.insert(LEGACY_PROFILES_KEY.into(), json!({"rgb": old, "cmyk": null}));
     let back = vectorcraft_format::load(&vectorcraft_format::save(&d, false)).unwrap();
     assert_eq!(doc_profiles(&back), (Some(cms::WIDE_GAMUT_RGB.to_string()), None));
     cms::set_active(&before).unwrap();
